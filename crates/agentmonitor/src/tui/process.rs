@@ -31,6 +31,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         ),
         Span::styled("   sampling @ ", theme::muted()),
         Span::raw(format!("{}s", app.config.sample_interval.as_secs())),
+        Span::styled("   trend ", theme::muted()),
+        Span::raw("▁▂▃▄▅▆▇█"),
+        Span::styled(" (low→high RSS, newest on right)", theme::muted()),
     ]))
     .block(
         Block::default()
@@ -52,10 +55,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let header = Row::new(vec![
         Cell::from("Agent"),
         Cell::from("PID"),
+        Cell::from("CWD"),
         Cell::from("RSS"),
         Cell::from("CPU %"),
         Cell::from("Uptime"),
-        Cell::from("History"),
+        Cell::from("RSS trend"),
     ])
     .style(theme::title());
 
@@ -68,10 +72,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|p| {
             let uptime = now_unix.saturating_sub(p.started_unix);
-            let hist = ascii_spark(&p.rss_history());
+            let hist = ascii_spark(&p.rss_history(), 14);
+            let agent_label = app
+                .adapters
+                .iter()
+                .find(|a| a.id() == p.agent)
+                .map(|a| a.display_name())
+                .unwrap_or(p.agent);
+            let cwd = p.cwd.as_deref().unwrap_or("-");
             Row::new(vec![
-                Cell::from(p.agent),
+                Cell::from(agent_label),
                 Cell::from(p.pid.to_string()),
+                Cell::from(shorten_path(cwd, 40)),
                 Cell::from(human_bytes(p.latest_rss_kb())),
                 Cell::from(format!("{:.1}", p.latest_cpu())),
                 Cell::from(format_uptime(uptime)),
@@ -81,12 +93,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let widths = [
+        Constraint::Length(12),
         Constraint::Length(8),
-        Constraint::Length(8),
+        Constraint::Min(20),
         Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(10),
-        Constraint::Min(10),
+        Constraint::Length(16),
     ];
 
     let table = Table::new(rows, widths)
@@ -107,17 +120,37 @@ fn format_uptime(secs: u64) -> String {
     }
 }
 
-/// Unicode block spark — good enough without pulling in the Sparkline widget
-/// for the table cell (which only takes a Cell<'_>).
-fn ascii_spark(values: &[u64]) -> String {
-    if values.is_empty() {
+/// Truncate a path from the left so the trailing segments (project name) stay
+/// visible — that's what users scan for when locating which workspace a PID
+/// belongs to.
+fn shorten_path(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max || max == 0 {
+        return s.to_string();
+    }
+    let take = max.saturating_sub(1);
+    let tail: String = s.chars().skip(count - take).collect();
+    format!("…{tail}")
+}
+
+/// Unicode block sparkline over the most recent `max_width` RSS samples.
+/// Flattens to a low bar when variance is below ~5% of peak so minor sampling
+/// jitter isn't rendered as a dramatic ridge.
+fn ascii_spark(values: &[u64], max_width: usize) -> String {
+    if values.is_empty() || max_width == 0 {
         return String::new();
     }
     const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let max = *values.iter().max().unwrap_or(&1).max(&1);
-    let min = *values.iter().min().unwrap_or(&0);
-    let range = (max - min).max(1) as f64;
-    values
+    let start = values.len().saturating_sub(max_width);
+    let slice = &values[start..];
+    let max = *slice.iter().max().unwrap_or(&0);
+    let min = *slice.iter().min().unwrap_or(&0);
+    let spread = max.saturating_sub(min);
+    if max == 0 || spread.saturating_mul(20) < max {
+        return BARS[1].to_string().repeat(slice.len());
+    }
+    let range = spread as f64;
+    slice
         .iter()
         .map(|v| {
             let norm = (*v - min) as f64 / range;

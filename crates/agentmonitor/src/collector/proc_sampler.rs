@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -7,6 +7,17 @@ use tokio::time::interval;
 
 use crate::adapter::DynAdapter;
 use crate::collector::metrics::{MetricsStore, ProcessSample};
+
+struct Candidate {
+    agent_id: &'static str,
+    ppid: Option<u32>,
+    name: String,
+    cmd: String,
+    cwd: Option<String>,
+    started_unix: u64,
+    rss_kb: u64,
+    cpu: f32,
+}
 
 /// Background sampler that refreshes agent-owned processes every `interval`.
 pub async fn run(
@@ -38,31 +49,67 @@ pub async fn run(
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let mut alive = HashSet::new();
+        let mut candidates: HashMap<u32, Candidate> = HashMap::new();
         for (pid, proc) in system.processes() {
             let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().into()).collect();
             let exe = proc.exe();
-            let agent = adapters
+            let Some(agent_id) = adapters
                 .iter()
                 .find(|a| a.matches_process(&cmd, exe))
-                .map(|a| a.id());
-            let Some(agent_id) = agent else {
+                .map(|a| a.id())
+            else {
                 continue;
             };
             let pid_u32 = pid.as_u32();
-            let rss_kb = proc.memory() / 1024;
-            let cpu = proc.cpu_usage();
-            let name = proc.name().to_string_lossy().to_string();
-            let cmd_str = cmd.join(" ");
-            let cwd = proc.cwd().map(|p| p.display().to_string());
-            let started_unix = proc.start_time();
+            candidates.insert(
+                pid_u32,
+                Candidate {
+                    agent_id,
+                    ppid: proc.parent().map(|p| p.as_u32()),
+                    name: proc.name().to_string_lossy().to_string(),
+                    cmd: cmd.join(" "),
+                    cwd: proc.cwd().map(|p| p.display().to_string()),
+                    started_unix: proc.start_time(),
+                    rss_kb: proc.memory() / 1024,
+                    cpu: proc.cpu_usage(),
+                },
+            );
+        }
+
+        // Suppress wrappers: if my parent is also claimed by the same adapter, it's
+        // the launcher (e.g. the `codex` shell/node shim forking the real node),
+        // and we only want the leaf so one session maps to one PID.
+        let mut wrapper_pids: HashSet<u32> = HashSet::new();
+        for cand in candidates.values() {
+            if let Some(ppid) = cand.ppid {
+                if let Some(parent) = candidates.get(&ppid) {
+                    if parent.agent_id == cand.agent_id {
+                        wrapper_pids.insert(ppid);
+                    }
+                }
+            }
+        }
+
+        let mut alive = HashSet::new();
+        for (pid, cand) in candidates {
+            if wrapper_pids.contains(&pid) {
+                continue;
+            }
             let sample = ProcessSample {
                 unix_ts: now,
-                rss_kb,
-                cpu,
+                rss_kb: cand.rss_kb,
+                cpu: cand.cpu,
             };
-            store.upsert(pid_u32, agent_id, name, cmd_str, cwd, started_unix, sample);
-            alive.insert(pid_u32);
+            store.upsert(
+                pid,
+                cand.agent_id,
+                cand.name,
+                cand.cmd,
+                cand.cwd,
+                cand.started_unix,
+                sample,
+            );
+            alive.insert(pid);
         }
         store.retain_alive(&alive);
         dirty.notify_one();

@@ -52,7 +52,7 @@ impl AgentAdapter for ClaudeAdapter {
         "claude"
     }
     fn display_name(&self) -> &'static str {
-        "Claude Code"
+        "ClaudeCode"
     }
     fn session_roots(&self) -> Vec<PathBuf> {
         self.root.iter().cloned().collect()
