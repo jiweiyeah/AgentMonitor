@@ -1,0 +1,100 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            pkg: darwin-arm64
+            binary: agent-monitor
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            pkg: darwin-x64
+            binary: agent-monitor
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            pkg: linux-x64-gnu
+            binary: agent-monitor
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04
+            pkg: linux-arm64-gnu
+            binary: agent-monitor
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2022
+            pkg: win32-x64
+            binary: agent-monitor.exe
+          - target: aarch64-pc-windows-msvc
+            runner: windows-2022
+            pkg: win32-arm64
+            binary: agent-monitor.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: ${{ matrix.cross }}
+        run: cargo install cross --locked
+
+      - name: Build (cargo)
+        if: ${{ !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: ${{ matrix.cross }}
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p npm/platforms/${{ matrix.pkg }}/bin
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
+             "npm/platforms/${{ matrix.pkg }}/bin/${{ matrix.binary }}"
+          chmod +x "npm/platforms/${{ matrix.pkg }}/bin/${{ matrix.binary }}" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.pkg }}
+          path: npm/platforms/${{ matrix.pkg }}
+
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: npm/platforms
+
+      - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for dir in npm/platforms/*/; do
+            echo "Publishing $dir"
+            (cd "$dir" && npm publish --access public)
+          done
+
+      - name: Publish main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: (cd npm/agent-monitor && npm publish --access public)

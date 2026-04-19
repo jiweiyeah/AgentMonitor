@@ -1,0 +1,155 @@
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Result;
+use parking_lot::RwLock;
+
+use crate::adapter::types::{MessagePreview, SessionMeta};
+use crate::adapter::{ClaudeAdapter, CodexAdapter, DynAdapter};
+use crate::collector::metrics::MetricsStore;
+use crate::config::Config;
+
+/// Active tab in the TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Dashboard,
+    Sessions,
+    Process,
+}
+
+impl Tab {
+    pub fn all() -> [Tab; 3] {
+        [Tab::Dashboard, Tab::Sessions, Tab::Process]
+    }
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Dashboard => "Dashboard",
+            Tab::Sessions => "Sessions",
+            Tab::Process => "Process",
+        }
+    }
+    pub fn next(self) -> Tab {
+        match self {
+            Tab::Dashboard => Tab::Sessions,
+            Tab::Sessions => Tab::Process,
+            Tab::Process => Tab::Dashboard,
+        }
+    }
+    pub fn prev(self) -> Tab {
+        match self {
+            Tab::Dashboard => Tab::Process,
+            Tab::Sessions => Tab::Dashboard,
+            Tab::Process => Tab::Sessions,
+        }
+    }
+    pub fn index(self) -> usize {
+        match self {
+            Tab::Dashboard => 0,
+            Tab::Sessions => 1,
+            Tab::Process => 2,
+        }
+    }
+}
+
+/// Shared state snapshot rendered every frame.
+#[derive(Debug, Default)]
+pub struct AppState {
+    pub sessions: Vec<SessionMeta>,
+    pub selected_session: usize,
+    pub dirty: bool,
+    /// Cached preview + full stats for the currently selected session.
+    /// Keyed by path so we don't re-render stale data after the list shifts.
+    pub preview: Option<PreviewCache>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviewCache {
+    pub path: PathBuf,
+    pub messages: Vec<MessagePreview>,
+    pub message_count: usize,
+    pub loading: bool,
+}
+
+/// App bundles shared state, config, adapters, and metric store.
+pub struct App {
+    pub config: Config,
+    pub state: Arc<RwLock<AppState>>,
+    pub metrics: Arc<MetricsStore>,
+    pub adapters: Vec<DynAdapter>,
+    pub tab: Tab,
+    pub should_quit: bool,
+}
+
+impl App {
+    pub async fn new(config: Config) -> Result<Self> {
+        let adapters: Vec<DynAdapter> = vec![
+            Arc::new(ClaudeAdapter::new(config.claude_root.clone())),
+            Arc::new(CodexAdapter::new(config.codex_root.clone())),
+        ];
+        let state = Arc::new(RwLock::new(AppState::default()));
+        let metrics = Arc::new(MetricsStore::new(config.metrics_capacity));
+        let app = Self {
+            config,
+            state,
+            metrics,
+            adapters,
+            tab: Tab::Dashboard,
+            should_quit: false,
+        };
+        app.initial_scan().await?;
+        Ok(app)
+    }
+
+    /// Blocking full scan across all adapters.
+    pub async fn initial_scan(&self) -> Result<()> {
+        let mut all = Vec::new();
+        for adapter in &self.adapters {
+            match adapter.scan_all().await {
+                Ok(mut metas) => all.append(&mut metas),
+                Err(err) => tracing::warn!(agent = adapter.id(), ?err, "scan failed"),
+            }
+        }
+        all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        let mut s = self.state.write();
+        s.sessions = all;
+        s.selected_session = 0;
+        s.dirty = true;
+        Ok(())
+    }
+
+    /// `--once-and-exit` path. Prints compact session list for benchmarking.
+    pub fn print_snapshot(&self) {
+        let state = self.state.read();
+        println!(
+            "agent-monitor snapshot — {} session(s)",
+            state.sessions.len()
+        );
+        for s in state.sessions.iter().take(20) {
+            println!(
+                "  [{:<6}] {} · {} · {}",
+                s.agent,
+                shorten(&s.id, 12),
+                s.cwd_display(),
+                s.model.clone().unwrap_or_else(|| "-".into()),
+            );
+        }
+    }
+
+    pub fn cycle_tab_next(&mut self) {
+        self.tab = self.tab.next();
+    }
+    pub fn cycle_tab_prev(&mut self) {
+        self.tab = self.tab.prev();
+    }
+    pub fn set_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+    }
+}
+
+fn shorten(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..n])
+    }
+}

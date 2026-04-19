@@ -1,0 +1,9 @@
+{
+  "name": "@agent-monitor/darwin-x64",
+  "version": "0.1.0",
+  "description": "agent-monitor native binary for macOS / x86_64",
+  "license": "MIT",
+  "os": ["darwin"],
+  "cpu": ["x64"],
+  "files": ["bin/"]
+}

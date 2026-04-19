@@ -1,0 +1,10 @@
+{
+  "name": "@agent-monitor/linux-arm64-gnu",
+  "version": "0.1.0",
+  "description": "agent-monitor native binary for Linux / aarch64 (glibc)",
+  "license": "MIT",
+  "os": ["linux"],
+  "cpu": ["arm64"],
+  "libc": ["glibc"],
+  "files": ["bin/"]
+}

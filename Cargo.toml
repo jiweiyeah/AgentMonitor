@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/agentmonitor"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/yjw/agent-monitor"
+rust-version = "1.82"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

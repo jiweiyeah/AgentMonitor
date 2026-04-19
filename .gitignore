@@ -1,0 +1,29 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Local dev vendor (used by npm launcher fallback; filled by CI for publish)
+/npm/agent-monitor/vendor/
+
+# Platform packages — binaries are produced by CI, not committed
+/npm/platforms/*/bin/
+
+# Packed tarballs
+*.tgz
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code project settings (contain tokens / local paths)
+.claude/
+.claude.json
+
+# Logs
+*.log

@@ -1,0 +1,34 @@
+{
+  "name": "agent-monitor",
+  "version": "0.1.0",
+  "description": "High-performance TUI to monitor Claude Code / Codex sessions and processes",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "agent-monitor": "bin/agent-monitor.js"
+  },
+  "files": ["bin/"],
+  "engines": {
+    "node": ">=16"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yjw/agent-monitor.git"
+  },
+  "keywords": [
+    "tui",
+    "claude",
+    "codex",
+    "monitor",
+    "agent",
+    "cli"
+  ],
+  "optionalDependencies": {
+    "@agent-monitor/darwin-arm64": "0.1.0",
+    "@agent-monitor/darwin-x64": "0.1.0",
+    "@agent-monitor/linux-arm64-gnu": "0.1.0",
+    "@agent-monitor/linux-x64-gnu": "0.1.0",
+    "@agent-monitor/win32-arm64": "0.1.0",
+    "@agent-monitor/win32-x64": "0.1.0"
+  }
+}
