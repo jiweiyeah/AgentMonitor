@@ -14,7 +14,7 @@ use crate::tui::stats::{
     ProjectRow,
 };
 use crate::tui::theme;
-use crate::tui::widgets::{ascii_spark, human_bytes};
+use crate::tui::widgets::{braille_spark, human_bytes, trend_arrow};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
@@ -135,27 +135,10 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
             ),
         ]),
         Line::from(vec![
-            Span::styled("By agent  ", theme::muted()),
+            Span::styled("Agents    ", theme::muted()),
             Span::raw(agent_summary),
-            Span::styled("   Live  ", theme::muted()),
-            bold(format!("{}", d.live_pids)),
-            Span::styled(" / ", theme::muted()),
-            Span::styled(
-                human_bytes(d.total_rss_kb),
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ),
         ]),
-        Line::from(vec![
-            Span::styled("Sampling  ", theme::muted()),
-            Span::raw(format!("{}s", d.sample_interval_secs)),
-            Span::styled("   RSS trend  ", theme::muted()),
-            Span::styled(
-                ascii_spark(d.rss_trend, 20),
-                Style::default().fg(theme::ACCENT),
-            ),
-        ]),
+        Line::from(process_row_spans(&d)),
     ];
 
     let widget = Paragraph::new(lines).block(
@@ -164,6 +147,62 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
             .title(Span::styled(" Overview ", theme::title())),
     );
     frame.render_widget(widget, area);
+}
+
+/// Third Overview row — process count, current RSS, direction + spark, then
+/// the trend window's range and sample cadence. Split out so the list of spans
+/// stays readable; there are otherwise 10+ pieces on one line.
+fn process_row_spans(d: &OverviewData<'_>) -> Vec<Span<'static>> {
+    let accent_bold = Style::default()
+        .fg(theme::ACCENT)
+        .add_modifier(Modifier::BOLD);
+    vec![
+        Span::styled("Process   ", theme::muted()),
+        bold(format!("{} live", d.live_pids)),
+        Span::styled(" · ", theme::muted()),
+        Span::styled(human_bytes(d.total_rss_kb), accent_bold),
+        Span::raw(" "),
+        Span::styled(trend_arrow(d.rss_trend), theme::muted()),
+        Span::raw("  "),
+        Span::styled(
+            braille_spark(d.rss_trend, 20),
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            trend_footnote(d.rss_trend, d.sample_interval_secs),
+            theme::muted(),
+        ),
+    ]
+}
+
+/// Small meta label shown at the end of the Process row: `(429-468 MB, 2s)`
+/// when the trend window has meaningful spread, otherwise just `(2s)` so we
+/// don't render `(468-468 MB, 2s)` when everything is flat.
+fn trend_footnote(trend: &[u64], sample_secs: u64) -> String {
+    let non_zero: Vec<u64> = trend.iter().copied().filter(|&v| v > 0).collect();
+    match (non_zero.iter().min(), non_zero.iter().max()) {
+        (Some(&min), Some(&max)) if max.saturating_sub(min).saturating_mul(20) >= max => {
+            format!("({}, {}s)", format_range(min, max), sample_secs)
+        }
+        _ => format!("({}s)", sample_secs),
+    }
+}
+
+/// Format two byte counts as a single collapsed range: when both fall in the
+/// same unit (both MB, both GB, …) we show `429-468 MB`; otherwise fall back
+/// to `min-max` with each side carrying its own unit.
+fn format_range(min_kb: u64, max_kb: u64) -> String {
+    let min_s = human_bytes(min_kb);
+    let max_s = human_bytes(max_kb);
+    let min_unit = min_s.rsplit(' ').next().unwrap_or("");
+    let max_unit = max_s.rsplit(' ').next().unwrap_or("");
+    if min_unit == max_unit && !min_unit.is_empty() {
+        let min_num = min_s.split_whitespace().next().unwrap_or("0");
+        format!("{min_num}-{max_s}")
+    } else {
+        format!("{min_s}-{max_s}")
+    }
 }
 
 fn render_activity(frame: &mut Frame, area: Rect, hist: &[u64], now: DateTime<Utc>) {
@@ -433,4 +472,49 @@ fn shorten_tail(s: &str, max: usize) -> String {
     let take = max.saturating_sub(1);
     let tail: String = s.chars().skip(s.chars().count() - take).collect();
     format!("…{tail}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_range_same_unit_collapses() {
+        // Both in MB → show `429-468 MB`.
+        assert_eq!(format_range(429 * 1024, 468 * 1024), "429.0-468.0 MB");
+    }
+
+    #[test]
+    fn format_range_mixed_units_keeps_both() {
+        // min in MB, max in GB → carry units on both sides.
+        let min_kb = 900 * 1024; // 900 MB
+        let max_kb = 3 * 1024 * 1024; // 3 GB
+        let s = format_range(min_kb, max_kb);
+        assert!(s.contains("MB-"), "expected MB prefix, got {s}");
+        assert!(s.ends_with(" GB"), "expected GB suffix, got {s}");
+    }
+
+    #[test]
+    fn trend_footnote_flat_drops_range() {
+        // All flat → only the sampling cadence is shown.
+        let trend = vec![468u64 * 1024; 10];
+        assert_eq!(trend_footnote(&trend, 2), "(2s)");
+    }
+
+    #[test]
+    fn trend_footnote_spread_shows_range_and_sampling() {
+        // 429..468 MB spread > 5 % → both pieces shown.
+        let mut trend = vec![429u64 * 1024; 5];
+        trend.extend(vec![468u64 * 1024; 5]);
+        let s = trend_footnote(&trend, 2);
+        assert!(s.contains("429"), "missing min in {s}");
+        assert!(s.contains("468"), "missing max in {s}");
+        assert!(s.ends_with(", 2s)"), "missing sampling in {s}");
+    }
+
+    #[test]
+    fn trend_footnote_all_zero_still_shows_sampling() {
+        // No process data yet → keep user oriented on the sampling cadence.
+        assert_eq!(trend_footnote(&[0, 0, 0], 5), "(5s)");
+    }
 }

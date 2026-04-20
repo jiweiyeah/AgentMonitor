@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::tui::stats::aggregate_rss_buckets;
 use crate::tui::theme;
-use crate::tui::widgets::{ascii_spark, human_bytes};
+use crate::tui::widgets::{ascii_spark, braille_spark, human_bytes, trend_arrow};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let procs = app.metrics.snapshot();
@@ -72,8 +72,10 @@ fn render_summary(frame: &mut Frame, area: Rect, app: &App, live_count: usize) {
         ]),
         Line::from(vec![
             Span::styled(" RSS trend ", theme::muted()),
+            Span::styled(trend_arrow(&rss_trend), theme::muted()),
+            Span::raw(" "),
             Span::styled(
-                ascii_spark(&rss_trend, spark_width),
+                braille_spark(&rss_trend, spark_width),
                 Style::default().fg(theme::ACCENT),
             ),
             Span::styled(
