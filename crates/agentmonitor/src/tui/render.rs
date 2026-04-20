@@ -41,13 +41,16 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, t)| Line::from(Span::raw(format!(" {} {} ", i + 1, t.title()))))
         .collect();
+    let title = Line::from(vec![
+        Span::styled(" agent-monitor ", theme::title()),
+        Span::styled(
+            format!("v{} ", env!("CARGO_PKG_VERSION")),
+            theme::muted(),
+        ),
+    ]);
     let tabs = Tabs::new(titles)
         .select(app.tab.index())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(" agent-monitor ", theme::title())),
-        )
+        .block(Block::default().borders(Borders::ALL).title(title))
         .highlight_style(theme::active_tab())
         .divider("|");
     frame.render_widget(tabs, chunks[0]);
