@@ -1,9 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{DateTime, Timelike, Utc};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Sparkline};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::adapter::types::agent_display_name;
@@ -82,7 +83,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .split(chunks[1]);
 
     let hist = activity_buckets(&sessions, now, 24);
-    render_activity(frame, middle[0], &hist);
+    render_activity(frame, middle[0], &hist, now);
 
     // Cap the list at what fits in the pane so the block never overflows.
     let top_n = middle[1].height.saturating_sub(3) as usize;
@@ -165,46 +166,130 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
     frame.render_widget(widget, area);
 }
 
-fn render_activity(frame: &mut Frame, area: Rect, hist: &[u64]) {
-    // Render order: block + sparkline inside + axis caption below (inside
-    // block). We can't compose directly, so allocate the inner area manually.
+fn render_activity(frame: &mut Frame, area: Rect, hist: &[u64], now: DateTime<Utc>) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(" 24h Activity ", theme::title()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if inner.height == 0 || inner.width == 0 {
+    if inner.height == 0 || inner.width == 0 || hist.is_empty() {
         return;
     }
-    let spark_area = Rect {
-        x: inner.x,
-        y: inner.y,
-        width: inner.width,
-        height: inner.height.saturating_sub(1).max(1),
-    };
-    let sparkline = Sparkline::default()
-        .data(hist)
-        .style(Style::default().fg(theme::ACCENT));
-    frame.render_widget(sparkline, spark_area);
 
-    if inner.height >= 2 {
+    // Row budget: bars | ticks | caption. Collapse from the bottom up when
+    // the pane is short.
+    let caption_h: u16 = if inner.height >= 2 { 1 } else { 0 };
+    let tick_h: u16 = if inner.height >= 4 { 1 } else { 0 };
+    let bars_h: u16 = inner.height.saturating_sub(caption_h + tick_h).max(1);
+
+    let n = hist.len();
+    let col_w = ((inner.width as usize) / n.max(1)).max(1);
+    // Reserve the last column of each slot as a gap so adjacent bars stay
+    // distinguishable and tick labels have breathing room.
+    let bar_w: usize = if col_w >= 2 { col_w - 1 } else { 1 };
+
+    let max_val = hist.iter().copied().max().unwrap_or(0);
+
+    // Fractional-height block glyphs (U+2581..U+2588) for eighths resolution.
+    const BLOCKS: [&str; 9] = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+    {
+        let buf = frame.buffer_mut();
+        for (i, &v) in hist.iter().enumerate() {
+            let x0 = inner.x + (i * col_w) as u16;
+            if x0 >= inner.x + inner.width {
+                break;
+            }
+            let total_eighths = bars_h as u64 * 8;
+            let h_eighths = if max_val == 0 {
+                0
+            } else {
+                v.saturating_mul(total_eighths) / max_val
+            };
+            let is_empty = v == 0;
+
+            for r in 0..bars_h {
+                let row_from_bottom = (bars_h - 1 - r) as u64;
+                let lower_edge = row_from_bottom * 8;
+                let fill = h_eighths.saturating_sub(lower_edge).min(8) as usize;
+                let y = inner.y + r;
+                let is_baseline = r == bars_h - 1;
+                for dx in 0..bar_w as u16 {
+                    let x = x0 + dx;
+                    if x >= inner.x + inner.width {
+                        break;
+                    }
+                    let Some(cell) = buf.cell_mut((x, y)) else {
+                        continue;
+                    };
+                    if fill > 0 {
+                        cell.set_symbol(BLOCKS[fill])
+                            .set_style(Style::default().fg(theme::ACCENT));
+                    } else if is_empty && is_baseline && dx == (bar_w / 2) as u16 {
+                        // Dim baseline marker keeps empty hours anchored under
+                        // their tick so sparse days remain readable.
+                        cell.set_symbol("·")
+                            .set_style(Style::default().fg(theme::MUTED));
+                    }
+                }
+            }
+        }
+    }
+
+    if tick_h > 0 {
+        let tick_y = inner.y + bars_h;
+        let now_hour = now.with_timezone(&chrono::Local).hour();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut cursor: usize = 0;
+        for i in 0..n {
+            let is_edge_right = i == n - 1;
+            let is_major = i % 6 == 0 || is_edge_right;
+            if !is_major {
+                continue;
+            }
+            let hours_ago = (n - 1 - i) as u32;
+            let label = if is_edge_right {
+                "now".to_string()
+            } else {
+                let hr = (now_hour + 24 - hours_ago % 24) % 24;
+                format!("{hr:02}h")
+            };
+            let target_x = i * col_w;
+            // Right-anchor "now" so its last char sits in the final bucket slot.
+            let start = if is_edge_right {
+                target_x + bar_w.saturating_sub(label.chars().count())
+            } else {
+                target_x
+            };
+            if start > cursor {
+                spans.push(Span::raw(" ".repeat(start - cursor)));
+                cursor = start;
+            }
+            cursor += label.chars().count();
+            spans.push(Span::styled(label, theme::muted()));
+        }
+        let tick_area = Rect {
+            x: inner.x,
+            y: tick_y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(Paragraph::new(Line::from(spans)), tick_area);
+    }
+
+    if caption_h > 0 {
         let caption_area = Rect {
             x: inner.x,
-            y: inner.y + inner.height - 1,
+            y: inner.y + bars_h + tick_h,
             width: inner.width,
             height: 1,
         };
         let total: u64 = hist.iter().sum();
-        let caption = Line::from(vec![
-            Span::styled("-24h", theme::muted()),
-            Span::raw(" "),
-            Span::styled(
-                format!("Σ {total} sessions"),
-                theme::muted(),
-            ),
-            Span::styled(format!("{:>width$}", "now", width = 8), theme::muted()),
-        ]);
+        let caption = Line::from(vec![Span::styled(
+            format!("Σ {total} sessions"),
+            theme::muted(),
+        )]);
         frame.render_widget(Paragraph::new(caption), caption_area);
     }
 }
