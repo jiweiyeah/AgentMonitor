@@ -31,7 +31,12 @@ pub fn human_bytes(bytes_kb: u64) -> String {
     }
 }
 
-pub fn token_bar_line(input: u64, cache_read: u64, cache_create: u64, output: u64) -> Line<'static> {
+pub fn token_bar_line(
+    input: u64,
+    cache_read: u64,
+    cache_create: u64,
+    output: u64,
+) -> Line<'static> {
     let total = input + cache_read + cache_create + output;
     let label = format!(
         "in {input}  cache_r {cache_read}  cache_w {cache_create}  out {output}  Σ {total}"

@@ -22,12 +22,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(" Live processes  ", theme::muted()),
         Span::styled(
             format!("{}", procs.len()),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("   aggregate RSS  ", theme::muted()),
         Span::styled(
             human_bytes(total_rss),
-            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("   sampling @ ", theme::muted()),
         Span::raw(format!("{}s", app.config.sample_interval.as_secs())),

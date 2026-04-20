@@ -12,10 +12,15 @@ pub fn muted() -> Style {
     Style::default().fg(MUTED)
 }
 pub fn selected() -> Style {
-    Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    Style::default()
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD)
 }
 pub fn active_tab() -> Style {
-    Style::default().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::Black)
+        .bg(ACCENT)
+        .add_modifier(Modifier::BOLD)
 }
 pub fn status_active() -> Style {
     Style::default().fg(SUCCESS).add_modifier(Modifier::BOLD)

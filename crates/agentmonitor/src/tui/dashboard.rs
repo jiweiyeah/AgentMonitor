@@ -43,12 +43,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("Total sessions  ", theme::muted()),
             Span::styled(
                 format!("{total_sessions}"),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("   last 24h  ", theme::muted()),
             Span::styled(
                 format!("{today_count}"),
-                Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::SUCCESS)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -59,12 +63,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("Live processes  ", theme::muted()),
             Span::styled(
                 format!("{}", procs.len()),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled("   aggregate RSS  ", theme::muted()),
             Span::styled(
                 human_bytes(total_rss),
-                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
@@ -89,7 +97,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .take(chunks[1].height.saturating_sub(2) as usize)
         .map(|s| {
             Line::from(vec![
-                Span::styled(format!(" {:<6}  ", s.agent), Style::default().fg(theme::ACCENT)),
+                Span::styled(
+                    format!(" {:<10}  ", s.agent_label()),
+                    Style::default().fg(theme::ACCENT),
+                ),
                 Span::raw(format!("{}  ", s.short_id())),
                 Span::styled(
                     s.updated_at
@@ -111,7 +122,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(list, chunks[1]);
 }
 
-fn agent_chips(by_agent: &HashMap<&str, usize>, adapters: &[crate::adapter::DynAdapter]) -> Span<'static> {
+fn agent_chips(
+    by_agent: &HashMap<&str, usize>,
+    adapters: &[crate::adapter::DynAdapter],
+) -> Span<'static> {
     let mut parts = Vec::new();
     for a in adapters {
         let count = by_agent.get(a.id()).copied().unwrap_or(0);

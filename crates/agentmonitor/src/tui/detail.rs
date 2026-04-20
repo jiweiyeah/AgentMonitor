@@ -34,7 +34,9 @@ fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&
     let (count_label, count_style) = match preview {
         Some(p) if p.path == s.path && !p.loading => (
             format!("{}", p.message_count),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Some(p) if p.path == s.path && p.loading => ("…".to_string(), theme::muted()),
         _ => ("-".to_string(), theme::muted()),
@@ -43,7 +45,7 @@ fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&
     let lines = vec![
         Line::from(vec![
             Span::styled("Agent    ", theme::muted()),
-            Span::raw(s.agent),
+            Span::raw(s.agent_label()),
             Span::raw("    "),
             status_span(s.status),
         ]),
@@ -126,27 +128,28 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: Option<&PreviewCache>)
             (lines, format!(" Recent messages ({}) ", p.messages.len()))
         }
     };
-    let para = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(title, theme::title())),
-        );
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(Span::styled(title, theme::title())),
+    );
     frame.render_widget(para, area);
 }
 
 fn message_to_lines(m: &MessagePreview) -> Vec<Line<'static>> {
     let role_style = match m.role {
-        MessageRole::User => Style::default().fg(theme::SUCCESS).add_modifier(Modifier::BOLD),
-        MessageRole::Assistant => Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+        MessageRole::User => Style::default()
+            .fg(theme::SUCCESS)
+            .add_modifier(Modifier::BOLD),
+        MessageRole::Assistant => Style::default()
+            .fg(theme::ACCENT)
+            .add_modifier(Modifier::BOLD),
         MessageRole::System => Style::default().fg(theme::WARN),
         _ => theme::muted(),
     };
-    let when = m
-        .ts
-        .map(|t| t.format("%m-%d %H:%M").to_string())
-        .unwrap_or_else(|| "".into());
+    let when =
+        m.ts.map(|t| t.format("%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "".into());
     let header = Line::from(vec![
         Span::styled(format!("[{}] ", m.role.label()), role_style),
         Span::styled(when, theme::muted()),

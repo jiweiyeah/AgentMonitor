@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod conversation;
 pub mod types;
 
 use std::path::Path;
@@ -12,10 +13,26 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
 pub use claude::ClaudeAdapter;
 pub use codex::CodexAdapter;
+pub use conversation::{Block, ConversationEvent};
 pub use types::*;
 
 /// Shared adapter handle stored in [`App`].
 pub type DynAdapter = Arc<dyn AgentAdapter>;
+
+/// Pick the adapter that owns the given session file. Uses `session_roots`
+/// first (path prefix match) so that `.jsonl` files under `~/.codex` are never
+/// mistakenly claimed by the Claude adapter, regardless of vec ordering.
+pub fn adapter_for_path<'a>(adapters: &'a [DynAdapter], path: &Path) -> Option<&'a DynAdapter> {
+    for a in adapters {
+        for root in a.session_roots() {
+            if path.starts_with(&root) && a.owns_path(path) {
+                return Some(a);
+            }
+        }
+    }
+    // Fallback: any adapter that explicitly claims the path.
+    adapters.iter().find(|a| a.owns_path(path))
+}
 
 /// Read the last `max` bytes of `path` as UTF-8 text (lossy), trimming the
 /// leading partial line so callers only see complete JSONL records.
@@ -65,6 +82,11 @@ pub trait AgentAdapter: Send + Sync + 'static {
     async fn scan_all(&self) -> Result<Vec<SessionMeta>>;
     /// Read the last `n` messages for preview. Default impl returns empty.
     async fn tail_messages(&self, _path: &Path, _n: usize) -> Result<Vec<MessagePreview>> {
+        Ok(Vec::new())
+    }
+    /// Parse the whole session file into a chronological list of events.
+    /// Default impl returns empty so adapters can opt in.
+    async fn load_conversation(&self, _path: &Path) -> Result<Vec<ConversationEvent>> {
         Ok(Vec::new())
     }
 }

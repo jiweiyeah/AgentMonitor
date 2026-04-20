@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use parking_lot::RwLock;
 
+use crate::adapter::conversation::ConversationEvent;
 use crate::adapter::types::{MessagePreview, SessionMeta};
 use crate::adapter::{ClaudeAdapter, CodexAdapter, DynAdapter};
 use crate::collector::metrics::MetricsStore;
@@ -51,6 +53,68 @@ impl Tab {
     }
 }
 
+/// UI mode. The default `Normal` mode renders the tab bar + body. `Viewer`
+/// takes over the whole screen with a full conversation transcript.
+#[derive(Debug, Clone, Default)]
+pub enum Mode {
+    #[default]
+    Normal,
+    Viewer {
+        path: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExpandMode {
+    #[default]
+    Collapsed,
+    Expanded,
+}
+
+/// Fully-parsed transcript kept alive while the viewer is (or was last) open.
+/// Lives on `AppState` so background loaders and the renderer share one source
+/// of truth without extra plumbing.
+#[derive(Debug)]
+pub struct ConversationCache {
+    pub path: PathBuf,
+    pub mtime: Option<SystemTime>,
+    pub events: Vec<ConversationEvent>,
+    pub scroll: u16,
+    pub expand: ExpandMode,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Viewport height of the body area, written by the renderer, read by the
+    /// event handler so Ctrl+D / PgDn can scroll by a real half-/full-page.
+    pub viewport_height: u16,
+    /// Total flattened line count from the last render. Used by the event
+    /// handler to clamp `scroll` so `G` and oversized deltas land on a real
+    /// row instead of leaving `scroll` out-of-bounds forever.
+    pub last_rendered_total: u32,
+}
+
+impl ConversationCache {
+    pub fn loading(path: PathBuf) -> Self {
+        Self {
+            path,
+            mtime: None,
+            events: Vec::new(),
+            scroll: 0,
+            expand: ExpandMode::Collapsed,
+            loading: true,
+            error: None,
+            viewport_height: 0,
+            last_rendered_total: 0,
+        }
+    }
+
+    /// Maximum valid scroll given the last known total and viewport height.
+    pub fn max_scroll(&self) -> u16 {
+        let total = self.last_rendered_total;
+        let h = self.viewport_height.max(1) as u32;
+        total.saturating_sub(h).min(u16::MAX as u32) as u16
+    }
+}
+
 /// Shared state snapshot rendered every frame.
 #[derive(Debug, Default)]
 pub struct AppState {
@@ -60,6 +124,11 @@ pub struct AppState {
     /// Cached preview + full stats for the currently selected session.
     /// Keyed by path so we don't re-render stale data after the list shifts.
     pub preview: Option<PreviewCache>,
+    pub mode: Mode,
+    /// Single-slot cache for the full-screen viewer. We don't LRU: the viewer
+    /// is a modal, only one is visible at a time, and re-opening the same
+    /// session hits this slot directly.
+    pub conversation: Option<ConversationCache>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,8 +195,8 @@ impl App {
         );
         for s in state.sessions.iter().take(20) {
             println!(
-                "  [{:<6}] {} · {} · {}",
-                s.agent,
+                "  [{:<10}] {} · {} · {}",
+                s.agent_label(),
                 shorten(&s.id, 12),
                 s.cwd_display(),
                 s.model.clone().unwrap_or_else(|| "-".into()),

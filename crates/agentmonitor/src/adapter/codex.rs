@@ -7,6 +7,7 @@ use serde_json::Value;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use super::conversation::{Block, ConversationEvent};
 use super::types::{MessagePreview, MessageRole, SessionMeta, SessionStatus, TokenStats};
 use super::AgentAdapter;
 
@@ -136,9 +137,9 @@ impl AgentAdapter for CodexAdapter {
             .collect();
 
         let this = self;
-        let futures = files.into_iter().map(|p| async move {
-            (p.clone(), this.parse_meta_fast(&p).await)
-        });
+        let futures = files
+            .into_iter()
+            .map(|p| async move { (p.clone(), this.parse_meta_fast(&p).await) });
         let results = futures::future::join_all(futures).await;
         let mut out = Vec::with_capacity(results.len());
         for (path, res) in results {
@@ -207,6 +208,27 @@ impl AgentAdapter for CodexAdapter {
         previews.reverse();
         Ok(previews)
     }
+
+    async fn load_conversation(&self, path: &Path) -> Result<Vec<ConversationEvent>> {
+        let file = fs::File::open(path)
+            .await
+            .with_context(|| format!("open {}", path.display()))?;
+        let mut reader = BufReader::new(file).lines();
+        let mut events: Vec<ConversationEvent> = Vec::new();
+        while let Some(line) = reader.next_line().await? {
+            let l = line.trim();
+            if l.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(l) else {
+                continue;
+            };
+            if let Some(ev) = codex_event_from_line(&v) {
+                events.push(ev);
+            }
+        }
+        Ok(events)
+    }
 }
 
 fn fold_codex_line(v: &Value, meta: &mut SessionMeta) {
@@ -259,9 +281,7 @@ fn fold_codex_line(v: &Value, meta: &mut SessionMeta) {
 async fn meta_of(file: &fs::File) -> (u64, Option<DateTime<Utc>>) {
     let m = file.metadata().await.ok();
     let size = m.as_ref().map(|m| m.len()).unwrap_or(0);
-    let mtime = m
-        .and_then(|m| m.modified().ok())
-        .map(DateTime::<Utc>::from);
+    let mtime = m.and_then(|m| m.modified().ok()).map(DateTime::<Utc>::from);
     (size, mtime)
 }
 
@@ -286,5 +306,250 @@ fn truncate(s: String, max: usize) -> String {
         let mut out: String = s.chars().take(max).collect();
         out.push('…');
         out
+    }
+}
+
+fn codex_event_from_line(v: &Value) -> Option<ConversationEvent> {
+    let top_type = v.get("type").and_then(|t| t.as_str())?;
+    if top_type != "response_item" {
+        return None;
+    }
+    let ts = v
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|d| d.with_timezone(&Utc));
+    let payload = v.get("payload")?;
+    let ptype = payload.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match ptype {
+        "message" => {
+            let role_str = payload
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("assistant");
+            let role = match role_str {
+                "user" => MessageRole::User,
+                "assistant" => MessageRole::Assistant,
+                "system" | "developer" => MessageRole::System,
+                other => MessageRole::Other(other.to_string()),
+            };
+            let text = payload
+                .get("content")
+                .and_then(|c| c.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(ConversationEvent {
+                ts,
+                role,
+                blocks: vec![Block::Text(text)],
+            })
+        }
+        "function_call" => {
+            let name = payload
+                .get("name")
+                .and_then(|t| t.as_str())
+                .unwrap_or("?")
+                .to_string();
+            let args_str = payload
+                .get("arguments")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            let args_val: Value = serde_json::from_str(args_str).unwrap_or(Value::Null);
+            let preview = codex_tool_preview(&name, &args_val, args_str);
+            let input = if args_val.is_null() {
+                args_str.to_string()
+            } else {
+                serde_json::to_string_pretty(&args_val).unwrap_or_else(|_| args_str.to_string())
+            };
+            Some(ConversationEvent {
+                ts,
+                role: MessageRole::Assistant,
+                blocks: vec![Block::ToolUse {
+                    name,
+                    preview,
+                    input,
+                }],
+            })
+        }
+        "function_call_output" => {
+            let output = payload
+                .get("output")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            if output.trim().is_empty() {
+                return None;
+            }
+            Some(ConversationEvent {
+                ts,
+                role: MessageRole::Tool,
+                blocks: vec![Block::ToolResult {
+                    is_error: false,
+                    content: output,
+                }],
+            })
+        }
+        "reasoning" => {
+            let text = payload
+                .get("summary")
+                .and_then(|s| s.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default();
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(ConversationEvent {
+                ts,
+                role: MessageRole::Assistant,
+                blocks: vec![Block::Thinking(text)],
+            })
+        }
+        _ => None,
+    }
+}
+
+fn codex_tool_preview(name: &str, args: &Value, raw: &str) -> String {
+    const KEYS: &[&str] = &["cmd", "command", "path", "file_path", "query", "url"];
+    for k in KEYS {
+        if let Some(s) = args.get(*k).and_then(|v| v.as_str()) {
+            return format!("{name}  {}", first_line_truncated(s, 100));
+        }
+    }
+    let snippet = first_line_truncated(raw, 100);
+    if snippet.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}  {snippet}")
+    }
+}
+
+fn first_line_truncated(s: &str, max: usize) -> String {
+    let line = s.lines().next().unwrap_or("").trim();
+    let count = line.chars().count();
+    if count <= max {
+        line.to_string()
+    } else {
+        let mut out: String = line.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn skips_non_response_items() {
+        for ty in ["session_meta", "event_msg", "turn_context"] {
+            let v = json!({"type": ty});
+            assert!(
+                codex_event_from_line(&v).is_none(),
+                "{ty} should be skipped"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_message_roles() {
+        let v = json!({
+            "type":"response_item",
+            "payload":{
+                "type":"message",
+                "role":"user",
+                "content":[{"type":"input_text","text":"hello"}]
+            }
+        });
+        let ev = codex_event_from_line(&v).expect("event");
+        assert!(matches!(ev.role, MessageRole::User));
+        assert!(matches!(&ev.blocks[0], Block::Text(s) if s == "hello"));
+
+        let dev = json!({
+            "type":"response_item",
+            "payload":{
+                "type":"message",
+                "role":"developer",
+                "content":[{"type":"input_text","text":"instructions"}]
+            }
+        });
+        let ev = codex_event_from_line(&dev).expect("event");
+        assert!(matches!(ev.role, MessageRole::System));
+    }
+
+    #[test]
+    fn parses_function_call() {
+        let v = json!({
+            "type":"response_item",
+            "payload":{
+                "type":"function_call",
+                "name":"exec_command",
+                "arguments": "{\"cmd\":\"ls\"}",
+                "call_id":"c1"
+            }
+        });
+        let ev = codex_event_from_line(&v).expect("event");
+        match &ev.blocks[0] {
+            Block::ToolUse {
+                name,
+                preview,
+                input,
+            } => {
+                assert_eq!(name, "exec_command");
+                assert!(preview.contains("ls"), "preview: {preview}");
+                assert!(input.contains("cmd"));
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_function_call_output() {
+        let v = json!({
+            "type":"response_item",
+            "payload":{
+                "type":"function_call_output",
+                "call_id":"c1",
+                "output":"stdout\nline2"
+            }
+        });
+        let ev = codex_event_from_line(&v).expect("event");
+        assert!(matches!(ev.role, MessageRole::Tool));
+        match &ev.blocks[0] {
+            Block::ToolResult { is_error, content } => {
+                assert!(!*is_error);
+                assert_eq!(content, "stdout\nline2");
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_reasoning_summary() {
+        let v = json!({
+            "type":"response_item",
+            "payload":{
+                "type":"reasoning",
+                "summary":[{"type":"summary_text","text":"step 1"}]
+            }
+        });
+        let ev = codex_event_from_line(&v).expect("event");
+        match &ev.blocks[0] {
+            Block::Thinking(s) => assert_eq!(s, "step 1"),
+            other => panic!("expected Thinking, got {other:?}"),
+        }
     }
 }

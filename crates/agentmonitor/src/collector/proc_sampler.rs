@@ -32,9 +32,7 @@ pub async fn run(
         .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet)
         .with_exe(sysinfo::UpdateKind::OnlyIfNotSet)
         .with_cwd(sysinfo::UpdateKind::OnlyIfNotSet);
-    let mut system = System::new_with_specifics(
-        RefreshKind::new().with_processes(refresh_kind),
-    );
+    let mut system = System::new_with_specifics(RefreshKind::new().with_processes(refresh_kind));
 
     let mut ticker = interval(tick);
     // Discard the immediate first tick so startup doesn't double-sample.
@@ -51,7 +49,11 @@ pub async fn run(
 
         let mut candidates: HashMap<u32, Candidate> = HashMap::new();
         for (pid, proc) in system.processes() {
-            let cmd: Vec<String> = proc.cmd().iter().map(|s| s.to_string_lossy().into()).collect();
+            let cmd: Vec<String> = proc
+                .cmd()
+                .iter()
+                .map(|s| s.to_string_lossy().into())
+                .collect();
             let exe = proc.exe();
             let Some(agent_id) = adapters
                 .iter()

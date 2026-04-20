@@ -67,6 +67,18 @@ impl SessionMeta {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "?".into())
     }
+
+    pub fn agent_label(&self) -> &'static str {
+        agent_display_name(self.agent)
+    }
+}
+
+pub fn agent_display_name(id: &str) -> &'static str {
+    match id {
+        "claude" => "ClaudeCode",
+        "codex" => "Codex",
+        _ => "unknown",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

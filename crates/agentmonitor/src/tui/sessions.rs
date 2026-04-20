@@ -24,8 +24,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or_else(|| "-----".into());
             let line = Line::from(vec![
                 Span::styled(
-                    format!("{:<6} ", s.agent),
-                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    format!("{:<10} ", s.agent_label()),
+                    Style::default()
+                        .fg(theme::ACCENT)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("{} ", when), theme::muted()),
                 Span::styled(
@@ -44,14 +46,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let list = List::new(items)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled(
-                    format!(" Sessions ({}) ", state.sessions.len()),
-                    theme::title(),
-                )),
-        )
+        .block(Block::default().borders(Borders::ALL).title(Span::styled(
+            format!(" Sessions ({}) ", state.sessions.len()),
+            theme::title(),
+        )))
         .highlight_style(theme::selected())
         .highlight_symbol("▶ ");
 
@@ -65,13 +63,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         let preview_ref = preview.as_ref().filter(|p| p.path == s.path);
         detail::render(frame, chunks[1], &s, preview_ref);
     } else {
-        let empty = Paragraph::new("No sessions found yet. Run `claude` or `codex` to see them here.")
-            .style(theme::muted())
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(Span::styled(" Detail ", theme::title())),
-            );
+        let empty =
+            Paragraph::new("No sessions found yet. Run `claude` or `codex` to see them here.")
+                .style(theme::muted())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(Span::styled(" Detail ", theme::title())),
+                );
         frame.render_widget(empty, chunks[1]);
     }
 

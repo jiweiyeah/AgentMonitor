@@ -44,6 +44,8 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 
 ## 快捷键
 
+### Tab 间导航（Normal 模式）
+
 | 按键 | 动作 |
 | --- | --- |
 | `1` / `2` / `3` | 切换 Dashboard / Sessions / Process 三个 tab |
@@ -51,8 +53,24 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 | `Shift+Tab` / `←` | 上一个 tab |
 | `j` / `↓` | 向下选择 |
 | `k` / `↑` | 向上选择 |
+| `Enter` | 在 Sessions tab 打开所选会话的完整对话查看器 |
 | `r` | 强制重扫会话 |
 | `q` / `Esc` / `Ctrl+C` | 退出 |
+
+### 对话查看器（Viewer 模式）
+
+| 按键 | 动作 |
+| --- | --- |
+| `Esc` / `q` | 返回 Sessions |
+| `j` / `↓` | 下滚一行 |
+| `k` / `↑` | 上滚一行 |
+| `Ctrl+D` / `Ctrl+U` | 半屏翻页 |
+| `PgDn` / `PgUp` | 整屏翻页 |
+| `g` / `G` | 跳到顶 / 底 |
+| `e` / `c` | 全部展开 / 全部折叠（thinking、tool_use、tool_result、attachment 默认折叠） |
+| `Ctrl+C` | 退出程序 |
+
+查看器按 mtime 缓存已解析的会话,并只把 visible 行交给 ratatui 渲染,1MB+ 会话也能常量时间滚动。
 
 ## 数据源
 
@@ -68,11 +86,11 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 ```
 crates/agentmonitor/
   src/
-    adapter/       各 agent 的会话解析与进程识别
+    adapter/       各 agent 的会话解析、进程识别、对话事件模型（conversation.rs）
     collector/     进程采样、文件监听、指标存储
-    tui/           ratatui 渲染
-    app.rs         共享状态
-    event.rs       事件循环
+    tui/           ratatui 渲染，包括全屏 viewer
+    app.rs         共享状态（AppState、Mode、ConversationCache）
+    event.rs       事件循环 + 键位分派
     main.rs        入口
 npm/               预编译二进制的 npm 发布管道
 ```

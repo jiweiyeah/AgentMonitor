@@ -1,5 +1,5 @@
 use std::io::Stdout;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,8 +10,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::Notify;
 
-use crate::adapter::DynAdapter;
-use crate::app::{App, PreviewCache, Tab};
+use crate::adapter::{adapter_for_path, DynAdapter};
+use crate::app::{App, ConversationCache, ExpandMode, Mode, PreviewCache, Tab};
 use crate::collector::{fs_watch, proc_sampler};
 use crate::tui::render;
 
@@ -87,9 +87,7 @@ pub async fn run_event_loop(
 
 fn current_selected_path(app: &App) -> Option<PathBuf> {
     let s = app.state.read();
-    s.sessions
-        .get(s.selected_session)
-        .map(|m| m.path.clone())
+    s.sessions.get(s.selected_session).map(|m| m.path.clone())
 }
 
 /// Spawn a task to load the preview (last messages + full message count)
@@ -139,18 +137,85 @@ fn maybe_load_preview(app: &App) {
     });
 }
 
+/// Ensure the conversation cache is populated for `path`, reusing any fresh
+/// entry. If `force` is true or the on-disk mtime is newer than the cached
+/// snapshot, a background reload is kicked off.
+fn ensure_conversation(app: &App, path: &Path, force: bool) {
+    let path_buf = path.to_path_buf();
+    // Fast path: already cached and not loading and not forced → nothing to do.
+    {
+        let s = app.state.read();
+        if let Some(cache) = &s.conversation {
+            if cache.path == path_buf && !cache.loading && !force && cache.error.is_none() {
+                return;
+            }
+        }
+    }
+    {
+        let mut s = app.state.write();
+        s.conversation = Some(ConversationCache::loading(path_buf.clone()));
+    }
+    let state = app.state.clone();
+    let adapters: Vec<DynAdapter> = app.adapters.clone();
+    tokio::spawn(async move {
+        let Some(adapter) = adapter_for_path(&adapters, &path_buf).cloned() else {
+            let mut s = state.write();
+            if let Some(cache) = &mut s.conversation {
+                if cache.path == path_buf {
+                    cache.loading = false;
+                    cache.error = Some("no adapter owns this path".into());
+                    s.dirty = true;
+                }
+            }
+            return;
+        };
+        let mtime = tokio::fs::metadata(&path_buf)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let result = adapter.load_conversation(&path_buf).await;
+        let mut s = state.write();
+        let Some(cache) = s.conversation.as_mut() else {
+            return;
+        };
+        if cache.path != path_buf {
+            return; // user moved on to another session
+        }
+        match result {
+            Ok(events) => {
+                cache.events = events;
+                cache.mtime = mtime;
+            }
+            Err(err) => {
+                cache.error = Some(err.to_string());
+            }
+        }
+        cache.loading = false;
+        s.dirty = true;
+    });
+}
+
 /// Returns `true` if the loop should exit.
 fn handle_event(ev: Event, app: &mut App) -> bool {
     let Event::Key(key) = ev else { return false };
     if key.kind != KeyEventKind::Press {
         return false;
     }
-    match (key.code, key.modifiers) {
+    // Ctrl+C always quits, regardless of mode.
+    if matches!(key.code, KeyCode::Char('c')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.should_quit = true;
+        return true;
+    }
+    let mode = app.state.read().mode.clone();
+    match mode {
+        Mode::Normal => handle_normal(key.code, key.modifiers, app),
+        Mode::Viewer { path } => handle_viewer(key.code, key.modifiers, app, &path),
+    }
+}
+
+fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {
+    match (code, modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
-            app.should_quit = true;
-            return true;
-        }
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             app.should_quit = true;
             return true;
         }
@@ -169,6 +234,20 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
             let mut s = app.state.write();
             if s.selected_session > 0 {
                 s.selected_session -= 1;
+            }
+        }
+        (KeyCode::Enter, _) if app.tab == Tab::Sessions => {
+            let path = {
+                let s = app.state.read();
+                s.sessions.get(s.selected_session).map(|m| m.path.clone())
+            };
+            if let Some(p) = path {
+                {
+                    let mut s = app.state.write();
+                    s.mode = Mode::Viewer { path: p.clone() };
+                    s.dirty = true;
+                }
+                ensure_conversation(app, &p, false);
             }
         }
         (KeyCode::Char('r'), _) => {
@@ -191,4 +270,90 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
         _ => {}
     }
     false
+}
+
+fn handle_viewer(code: KeyCode, _modifiers: KeyModifiers, app: &mut App, _path: &Path) -> bool {
+    match (code, _modifiers) {
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+            let mut s = app.state.write();
+            s.mode = Mode::Normal;
+            s.dirty = true;
+        }
+        (KeyCode::Char('j') | KeyCode::Down, _) => scroll_by(app, 1),
+        (KeyCode::Char('k') | KeyCode::Up, _) => scroll_by(app, -1),
+        (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => scroll_half(app, 1),
+        (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => scroll_half(app, -1),
+        (KeyCode::PageDown, _) => scroll_page(app, 1),
+        (KeyCode::PageUp, _) => scroll_page(app, -1),
+        (KeyCode::Char('g'), _) => set_scroll(app, 0),
+        (KeyCode::Char('G'), _) => set_scroll(app, u16::MAX),
+        (KeyCode::Char('e'), _) => set_expand(app, ExpandMode::Expanded),
+        (KeyCode::Char('c'), _) => set_expand(app, ExpandMode::Collapsed),
+        _ => {}
+    }
+    false
+}
+
+fn scroll_by(app: &App, delta: i32) {
+    let mut s = app.state.write();
+    let Some(c) = s.conversation.as_mut() else {
+        return;
+    };
+    let max = c.max_scroll();
+    c.scroll = apply_delta(c.scroll, delta).min(max);
+    s.dirty = true;
+}
+
+fn scroll_half(app: &App, dir: i32) {
+    let h = viewport_height(app);
+    let step = (h as i32 / 2).max(1) * dir;
+    scroll_by(app, step);
+}
+
+fn scroll_page(app: &App, dir: i32) {
+    let h = viewport_height(app);
+    let step = (h as i32).max(1) * dir;
+    scroll_by(app, step);
+}
+
+fn viewport_height(app: &App) -> u16 {
+    app.state
+        .read()
+        .conversation
+        .as_ref()
+        .map(|c| c.viewport_height)
+        .unwrap_or(20)
+        .max(1)
+}
+
+fn set_scroll(app: &App, v: u16) {
+    let mut s = app.state.write();
+    let Some(c) = s.conversation.as_mut() else {
+        return;
+    };
+    let max = c.max_scroll();
+    c.scroll = v.min(max);
+    s.dirty = true;
+}
+
+fn set_expand(app: &App, m: ExpandMode) {
+    let mut s = app.state.write();
+    let Some(c) = s.conversation.as_mut() else {
+        return;
+    };
+    if c.expand != m {
+        c.expand = m;
+        // Line positions shift when we change expand mode; reset scroll so the
+        // viewport lands on a predictable spot instead of mid-block.
+        c.scroll = 0;
+        s.dirty = true;
+    }
+}
+
+fn apply_delta(scroll: u16, delta: i32) -> u16 {
+    if delta < 0 {
+        scroll.saturating_sub((-delta) as u16)
+    } else {
+        scroll.saturating_add(delta as u16)
+    }
 }

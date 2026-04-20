@@ -14,11 +14,7 @@ use crate::adapter::DynAdapter;
 use crate::app::AppState;
 
 /// Background task: owns a notify watcher + fallback ticker.
-pub async fn run(
-    adapters: Vec<DynAdapter>,
-    state: Arc<RwLock<AppState>>,
-    dirty: Arc<Notify>,
-) {
+pub async fn run(adapters: Vec<DynAdapter>, state: Arc<RwLock<AppState>>, dirty: Arc<Notify>) {
     let (ev_tx, mut ev_rx) = unbounded_channel::<Event>();
 
     // Notify uses a blocking callback. Bridge it into a tokio channel.
@@ -30,7 +26,10 @@ pub async fn run(
     let mut watcher = match watcher_result {
         Ok(w) => w,
         Err(err) => {
-            tracing::warn!(?err, "notify watcher unavailable; falling back to polling only");
+            tracing::warn!(
+                ?err,
+                "notify watcher unavailable; falling back to polling only"
+            );
             return fallback_only(adapters, state, dirty).await;
         }
     };
@@ -97,11 +96,7 @@ async fn handle_event(ev: Event, adapters: &[DynAdapter], state: &Arc<RwLock<App
     }
 }
 
-async fn update_for_path(
-    path: PathBuf,
-    adapters: &[DynAdapter],
-    state: &Arc<RwLock<AppState>>,
-) {
+async fn update_for_path(path: PathBuf, adapters: &[DynAdapter], state: &Arc<RwLock<AppState>>) {
     let Some(adapter) = adapters.iter().find(|a| a.owns_path(&path)) else {
         return;
     };
