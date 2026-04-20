@@ -276,6 +276,55 @@ fn fold_codex_line(v: &Value, meta: &mut SessionMeta) {
             meta.updated_at = Some(dt.with_timezone(&Utc));
         }
     }
+    // Codex emits an `event_msg` with `payload.type == "token_count"` after
+    // every model turn. `payload.info.total_token_usage` is *cumulative* for
+    // the whole session, so we overwrite (not add) — the final line in file
+    // order therefore produces the canonical total. `last_token_usage` is a
+    // fallback for older log variants that only carry the per-turn delta.
+    if top_type == "event_msg" {
+        if let Some(payload) = v.get("payload") {
+            if payload.get("type").and_then(|t| t.as_str()) == Some("token_count") {
+                apply_codex_token_count(payload, meta);
+            }
+        }
+    }
+}
+
+/// Overwrite `meta.tokens` from one `token_count` payload. See notes in
+/// `fold_codex_line` on cumulative vs delta semantics. Mapping rules:
+///
+/// - `input_tokens - cached_input_tokens` → `tokens.input` (fresh input only)
+/// - `cached_input_tokens`               → `tokens.cache_read`
+/// - `output_tokens`                     → `tokens.output` (already includes
+///   reasoning_output_tokens in OpenAI accounting, so we don't add it)
+/// - Codex doesn't report cache creation, so that bucket stays 0.
+fn apply_codex_token_count(payload: &Value, meta: &mut SessionMeta) {
+    let info = match payload.get("info") {
+        Some(v) if !v.is_null() => v,
+        _ => return,
+    };
+    let usage = info
+        .get("total_token_usage")
+        .or_else(|| info.get("last_token_usage"));
+    let Some(usage) = usage else { return };
+
+    let input_total = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cached_input = usage
+        .get("cached_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_total = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    meta.tokens.input = input_total.saturating_sub(cached_input);
+    meta.tokens.cache_read = cached_input;
+    meta.tokens.output = output_total;
+    meta.tokens.cache_creation = 0;
 }
 
 async fn meta_of(file: &fs::File) -> (u64, Option<DateTime<Utc>>) {
@@ -551,5 +600,106 @@ mod tests {
             Block::Thinking(s) => assert_eq!(s, "step 1"),
             other => panic!("expected Thinking, got {other:?}"),
         }
+    }
+
+    fn empty_meta() -> SessionMeta {
+        SessionMeta {
+            agent: "codex",
+            id: String::new(),
+            path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            cwd: None,
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 0,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Unknown,
+            byte_offset: 0,
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn codex_token_count_is_cumulative_last_wins() {
+        // Three token_count events; only the last cumulative total should be
+        // reflected. This proves we overwrite (not add) across the file.
+        let mut meta = empty_meta();
+        for (input, output, cached) in [(100u64, 10u64, 0u64), (200, 20, 5), (300, 30, 10)] {
+            let v = serde_json::json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": input,
+                            "cached_input_tokens": cached,
+                            "output_tokens": output,
+                            "reasoning_output_tokens": 0,
+                            "total_tokens": input + output
+                        }
+                    }
+                }
+            });
+            fold_codex_line(&v, &mut meta);
+        }
+        assert_eq!(meta.tokens.input, 290, "input = input_tokens - cached");
+        assert_eq!(meta.tokens.cache_read, 10);
+        assert_eq!(meta.tokens.output, 30);
+        assert_eq!(meta.tokens.cache_creation, 0);
+        assert_eq!(
+            meta.tokens.total(),
+            330,
+            "Σ should equal input_tokens + output_tokens from last cumulative"
+        );
+    }
+
+    #[test]
+    fn codex_token_count_falls_back_to_last_token_usage() {
+        let mut meta = empty_meta();
+        let v = serde_json::json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 50,
+                        "cached_input_tokens": 5,
+                        "output_tokens": 7
+                    }
+                }
+            }
+        });
+        fold_codex_line(&v, &mut meta);
+        assert_eq!(meta.tokens.input, 45);
+        assert_eq!(meta.tokens.cache_read, 5);
+        assert_eq!(meta.tokens.output, 7);
+    }
+
+    #[test]
+    fn codex_non_token_count_event_leaves_tokens_untouched() {
+        let mut meta = empty_meta();
+        meta.tokens.input = 123;
+        let v = serde_json::json!({
+            "type": "event_msg",
+            "payload": { "type": "agent_message", "payload": {} }
+        });
+        fold_codex_line(&v, &mut meta);
+        assert_eq!(meta.tokens.input, 123, "unrelated event must not clobber");
+    }
+
+    #[test]
+    fn codex_token_count_with_null_info_is_safe() {
+        // Early in a session Codex emits `info: null`. Must not panic or
+        // silently zero the prior value.
+        let mut meta = empty_meta();
+        meta.tokens.input = 50;
+        let v = serde_json::json!({
+            "type": "event_msg",
+            "payload": { "type": "token_count", "info": null }
+        });
+        fold_codex_line(&v, &mut meta);
+        assert_eq!(meta.tokens.input, 50);
     }
 }

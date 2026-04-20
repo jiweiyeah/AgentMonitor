@@ -9,6 +9,7 @@ use crate::adapter::conversation::ConversationEvent;
 use crate::adapter::types::{MessagePreview, SessionMeta};
 use crate::adapter::{ClaudeAdapter, CodexAdapter, DynAdapter};
 use crate::collector::metrics::MetricsStore;
+use crate::collector::token_refresh::TokenCache;
 use crate::config::Config;
 
 /// Active tab in the TUI.
@@ -115,6 +116,33 @@ impl ConversationCache {
     }
 }
 
+/// Sort order applied to the Sessions list. The default (`UpdatedDesc`) is
+/// what the raw storage already holds, so it's a no-op in that case.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionSort {
+    #[default]
+    UpdatedDesc,
+    SizeDesc,
+    MessagesDesc,
+}
+
+impl SessionSort {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UpdatedDesc => "updated↓",
+            Self::SizeDesc => "size↓",
+            Self::MessagesDesc => "msgs↓",
+        }
+    }
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::UpdatedDesc => Self::SizeDesc,
+            Self::SizeDesc => Self::MessagesDesc,
+            Self::MessagesDesc => Self::UpdatedDesc,
+        }
+    }
+}
+
 /// Shared state snapshot rendered every frame.
 #[derive(Debug, Default)]
 pub struct AppState {
@@ -129,6 +157,63 @@ pub struct AppState {
     /// is a modal, only one is visible at a time, and re-opening the same
     /// session hits this slot directly.
     pub conversation: Option<ConversationCache>,
+}
+
+impl AppState {
+    /// Compute the indices of `sessions` that pass `filter` and are sorted
+    /// according to `sort`. Returned indices refer to the raw `self.sessions`
+    /// vector, so callers can use them to index back into it without cloning.
+    pub fn visible_session_indices(&self, filter: &str, sort: SessionSort) -> Vec<usize> {
+        let needle = filter.trim().to_lowercase();
+        let mut idxs: Vec<usize> = (0..self.sessions.len())
+            .filter(|&i| needle.is_empty() || session_matches_filter(&self.sessions[i], &needle))
+            .collect();
+        match sort {
+            SessionSort::UpdatedDesc => {
+                // Storage is already sorted by updated_at desc, but a filter
+                // may have skipped rows — keep the relative order stable.
+            }
+            SessionSort::SizeDesc => {
+                idxs.sort_by(|&a, &b| {
+                    self.sessions[b].size_bytes.cmp(&self.sessions[a].size_bytes)
+                });
+            }
+            SessionSort::MessagesDesc => {
+                idxs.sort_by(|&a, &b| {
+                    self.sessions[b]
+                        .message_count
+                        .cmp(&self.sessions[a].message_count)
+                });
+            }
+        }
+        idxs
+    }
+}
+
+fn session_matches_filter(s: &SessionMeta, needle: &str) -> bool {
+    // Case-insensitive substring match over the high-signal fields a user
+    // would narrow on: project path, id, branch, agent label.
+    if s.id.to_lowercase().contains(needle) {
+        return true;
+    }
+    if s.agent_label().to_lowercase().contains(needle) {
+        return true;
+    }
+    if let Some(cwd) = &s.cwd {
+        if cwd
+            .to_string_lossy()
+            .to_lowercase()
+            .contains(needle)
+        {
+            return true;
+        }
+    }
+    if let Some(branch) = &s.git_branch {
+        if branch.to_lowercase().contains(needle) {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +232,19 @@ pub struct App {
     pub adapters: Vec<DynAdapter>,
     pub tab: Tab,
     pub should_quit: bool,
+    /// Sessions-tab filter text. Applied case-insensitively over cwd/id/branch.
+    pub session_filter: String,
+    /// True while the user is typing in the filter input — swallows keys like
+    /// `q` and `Esc` so they edit the filter instead of quitting.
+    pub session_filter_input: bool,
+    pub session_sort: SessionSort,
+    /// Process-tab row selection. Indexes into `metrics.snapshot()`.
+    pub selected_process: usize,
+    /// Per-session token cache (`(path, mtime) → tokens + message_count`).
+    /// Fed by `collector::token_refresh` in the background so the Dashboard
+    /// aggregates and the Sessions list see accurate numbers without waiting
+    /// on a full-parse per frame.
+    pub token_cache: Arc<TokenCache>,
 }
 
 impl App {
@@ -157,6 +255,7 @@ impl App {
         ];
         let state = Arc::new(RwLock::new(AppState::default()));
         let metrics = Arc::new(MetricsStore::new(config.metrics_capacity));
+        let token_cache = Arc::new(TokenCache::new());
         let app = Self {
             config,
             state,
@@ -164,12 +263,21 @@ impl App {
             adapters,
             tab: Tab::Dashboard,
             should_quit: false,
+            session_filter: String::new(),
+            session_filter_input: false,
+            session_sort: SessionSort::default(),
+            selected_process: 0,
+            token_cache,
         };
         app.initial_scan().await?;
         Ok(app)
     }
 
-    /// Blocking full scan across all adapters.
+    /// Blocking full scan across all adapters. Fast-parse tokens are zeroed
+    /// out because they only reflect the JSONL header and would otherwise
+    /// ship to the Dashboard as-is; `collector::token_refresh` is the sole
+    /// writer for `tokens` and `message_count`, and it fills in real totals
+    /// on its first pass.
     pub async fn initial_scan(&self) -> Result<()> {
         let mut all = Vec::new();
         for adapter in &self.adapters {
@@ -177,6 +285,10 @@ impl App {
                 Ok(mut metas) => all.append(&mut metas),
                 Err(err) => tracing::warn!(agent = adapter.id(), ?err, "scan failed"),
             }
+        }
+        for m in &mut all {
+            m.tokens = crate::adapter::types::TokenStats::default();
+            m.message_count = 0;
         }
         all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         let mut s = self.state.write();
@@ -220,5 +332,86 @@ fn shorten(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..n])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::types::TokenStats;
+    use chrono::{TimeZone, Utc};
+    use std::path::PathBuf;
+
+    fn mk(
+        agent: &'static str,
+        id: &str,
+        cwd: Option<&str>,
+        size: u64,
+        msgs: usize,
+        updated_minutes_ago: i64,
+    ) -> SessionMeta {
+        let now = Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
+        SessionMeta {
+            agent,
+            id: id.into(),
+            path: PathBuf::from(format!("/tmp/{id}.jsonl")),
+            cwd: cwd.map(PathBuf::from),
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: Some(now - chrono::Duration::minutes(updated_minutes_ago)),
+            message_count: msgs,
+            tokens: TokenStats::default(),
+            status: Default::default(),
+            byte_offset: 0,
+            size_bytes: size,
+        }
+    }
+
+    fn state_with(sessions: Vec<SessionMeta>) -> AppState {
+        AppState {
+            sessions,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn visible_indices_filter_matches_cwd_id_and_is_case_insensitive() {
+        let state = state_with(vec![
+            mk("claude", "abc123", Some("/repos/AgentMonitor"), 10, 1, 0),
+            mk("codex", "xyz789", Some("/repos/other"), 20, 5, 10),
+            mk("claude", "def456", None, 5, 2, 30),
+        ]);
+        let idxs = state.visible_session_indices("agent", SessionSort::UpdatedDesc);
+        assert_eq!(idxs, vec![0], "filter matches cwd substring case-insensitive");
+
+        let idxs = state.visible_session_indices("XYZ", SessionSort::UpdatedDesc);
+        assert_eq!(idxs, vec![1], "filter matches id case-insensitive");
+
+        let idxs = state.visible_session_indices("", SessionSort::UpdatedDesc);
+        assert_eq!(idxs, vec![0, 1, 2], "empty filter keeps all, preserves order");
+    }
+
+    #[test]
+    fn visible_indices_sort_by_size_and_messages() {
+        let state = state_with(vec![
+            mk("claude", "a", None, 10, 1, 0),
+            mk("claude", "b", None, 30, 5, 10),
+            mk("claude", "c", None, 20, 3, 20),
+        ]);
+        let by_size = state.visible_session_indices("", SessionSort::SizeDesc);
+        assert_eq!(by_size, vec![1, 2, 0]);
+        let by_msgs = state.visible_session_indices("", SessionSort::MessagesDesc);
+        assert_eq!(by_msgs, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn session_sort_cycle_round_trips() {
+        let s = SessionSort::default();
+        assert_eq!(s, SessionSort::UpdatedDesc);
+        assert_eq!(s.cycle(), SessionSort::SizeDesc);
+        assert_eq!(s.cycle().cycle(), SessionSort::MessagesDesc);
+        assert_eq!(s.cycle().cycle().cycle(), SessionSort::UpdatedDesc);
     }
 }

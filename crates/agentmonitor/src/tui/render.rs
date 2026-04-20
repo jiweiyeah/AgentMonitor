@@ -60,19 +60,41 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // ── footer hint ─────────────────────────────────────
-    let mut spans = vec![
-        Span::styled(" q ", Style::default()),
-        Span::styled("quit ", theme::muted()),
-        Span::styled(" Tab ", Style::default()),
-        Span::styled("switch ", theme::muted()),
-        Span::styled(" j/k ", Style::default()),
-        Span::styled("move ", theme::muted()),
-        Span::styled(" r ", Style::default()),
-        Span::styled("refresh ", theme::muted()),
-    ];
-    if app.tab == Tab::Sessions {
+    let filter_active = app.session_filter_input && app.tab == Tab::Sessions;
+    let mut spans: Vec<Span> = Vec::new();
+    if filter_active {
+        spans.push(Span::styled(" Esc ", Style::default()));
+        spans.push(Span::styled("cancel ", theme::muted()));
         spans.push(Span::styled(" Enter ", Style::default()));
-        spans.push(Span::styled("open viewer ", theme::muted()));
+        spans.push(Span::styled("apply ", theme::muted()));
+        spans.push(Span::styled(" ⌫ ", Style::default()));
+        spans.push(Span::styled("delete ", theme::muted()));
+    } else {
+        spans.push(Span::styled(" q ", Style::default()));
+        spans.push(Span::styled("quit ", theme::muted()));
+        spans.push(Span::styled(" Tab ", Style::default()));
+        spans.push(Span::styled("switch ", theme::muted()));
+        spans.push(Span::styled(" j/k ", Style::default()));
+        spans.push(Span::styled("move ", theme::muted()));
+        spans.push(Span::styled(" r ", Style::default()));
+        spans.push(Span::styled("refresh ", theme::muted()));
+        match app.tab {
+            Tab::Sessions => {
+                spans.push(Span::styled(" / ", Style::default()));
+                spans.push(Span::styled("filter ", theme::muted()));
+                spans.push(Span::styled(" s ", Style::default()));
+                spans.push(Span::styled("sort ", theme::muted()));
+                spans.push(Span::styled(" c ", Style::default()));
+                spans.push(Span::styled("clear ", theme::muted()));
+                spans.push(Span::styled(" Enter ", Style::default()));
+                spans.push(Span::styled("open viewer ", theme::muted()));
+            }
+            Tab::Process => {
+                spans.push(Span::styled(" Enter ", Style::default()));
+                spans.push(Span::styled("jump to session ", theme::muted()));
+            }
+            Tab::Dashboard => {}
+        }
     }
     let footer = Paragraph::new(Line::from(spans));
     frame.render_widget(footer, chunks[2]);

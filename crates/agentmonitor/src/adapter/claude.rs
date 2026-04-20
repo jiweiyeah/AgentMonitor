@@ -268,25 +268,87 @@ fn fold_claude_line(v: &Value, meta: &mut SessionMeta) {
         if let Some(model) = msg.get("model").and_then(|m| m.as_str()) {
             meta.model = Some(model.to_string());
         }
-        if let Some(usage) = msg.get("usage") {
-            if let Some(n) = usage.get("input_tokens").and_then(|u| u.as_u64()) {
-                meta.tokens.input += n;
-            }
-            if let Some(n) = usage.get("output_tokens").and_then(|u| u.as_u64()) {
-                meta.tokens.output += n;
-            }
-            if let Some(n) = usage
-                .get("cache_read_input_tokens")
-                .and_then(|u| u.as_u64())
-            {
-                meta.tokens.cache_read += n;
-            }
-            if let Some(n) = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|u| u.as_u64())
-            {
-                meta.tokens.cache_creation += n;
-            }
+    }
+    // 3-level precedence for per-line token usage:
+    //   1. message.usage            (assistant turns — most common)
+    //   2. toolUseResult.usage      (a few tools report their own usage)
+    //   3. toolUseResult.totalTokens (legacy fallback, oriented by msg type)
+    // Only one source contributes per line so we don't double-count.
+    if !apply_message_usage(v, meta) {
+        apply_tool_use_result(v, meta);
+    }
+}
+
+fn apply_message_usage(v: &Value, meta: &mut SessionMeta) -> bool {
+    let Some(usage) = v.get("message").and_then(|m| m.get("usage")) else {
+        return false;
+    };
+    let mut touched = false;
+    if let Some(n) = usage.get("input_tokens").and_then(|u| u.as_u64()) {
+        meta.tokens.input += n;
+        touched = true;
+    }
+    if let Some(n) = usage.get("output_tokens").and_then(|u| u.as_u64()) {
+        meta.tokens.output += n;
+        touched = true;
+    }
+    if let Some(n) = usage
+        .get("cache_read_input_tokens")
+        .and_then(|u| u.as_u64())
+    {
+        meta.tokens.cache_read += n;
+        touched = true;
+    }
+    if let Some(n) = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|u| u.as_u64())
+    {
+        meta.tokens.cache_creation += n;
+        touched = true;
+    }
+    touched
+}
+
+fn apply_tool_use_result(v: &Value, meta: &mut SessionMeta) {
+    let Some(tur) = v.get("toolUseResult") else {
+        return;
+    };
+    if let Some(usage) = tur.get("usage") {
+        let mut any = false;
+        if let Some(n) = usage.get("input_tokens").and_then(|u| u.as_u64()) {
+            meta.tokens.input += n;
+            any = true;
+        }
+        if let Some(n) = usage.get("output_tokens").and_then(|u| u.as_u64()) {
+            meta.tokens.output += n;
+            any = true;
+        }
+        if let Some(n) = usage
+            .get("cache_read_input_tokens")
+            .and_then(|u| u.as_u64())
+        {
+            meta.tokens.cache_read += n;
+            any = true;
+        }
+        if let Some(n) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|u| u.as_u64())
+        {
+            meta.tokens.cache_creation += n;
+            any = true;
+        }
+        if any {
+            return;
+        }
+    }
+    // Legacy `totalTokens` fallback: attribute to output for assistant lines,
+    // input otherwise, matching the reference implementation.
+    if let Some(total) = tur.get("totalTokens").and_then(|t| t.as_u64()) {
+        let msg_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if msg_type == "assistant" {
+            meta.tokens.output += total;
+        } else {
+            meta.tokens.input += total;
         }
     }
 }
@@ -331,14 +393,24 @@ fn decode_cwd_from_parent(path: &Path) -> Option<PathBuf> {
 }
 
 fn is_native_first_type(t: Option<&str>) -> bool {
-    // Real Claude Code sessions begin with one of these record types. Plugin
-    // data files that happen to live under `~/.claude/projects/` (e.g. the
-    // `queue-operation` rows claude-mem writes for its observer queue) open
-    // with a non-conversation type and should be skipped.
-    matches!(
-        t.unwrap_or(""),
-        "summary" | "user" | "assistant" | "system" | "file-history-snapshot"
-    )
+    // Claude Code's session JSONL can open with many record types depending
+    // on CLI version: conversation content (user/assistant/system/summary),
+    // environment metadata (permission-mode, attachment, progress,
+    // worktree-state), or the legacy file-history-snapshot. New record types
+    // get added as the CLI evolves, so maintaining an allowlist is fragile —
+    // we fall behind, real sessions vanish from the dashboard, and the user
+    // sees "tokens stuck at old value" because the active session was
+    // silently rejected.
+    //
+    // Invert the check: reject only files we *know* aren't Claude Code
+    // sessions. Today that's just claude-mem's `queue-operation` rows, which
+    // live alongside real session files under `~/.claude/projects/`. Every
+    // other first-line type is treated as a valid session.
+    match t {
+        None => false, // empty file — nothing to parse
+        Some("queue-operation") => false, // claude-mem observer queue
+        Some(_) => true,
+    }
 }
 
 async fn meta_of(file: &fs::File) -> (u64, Option<DateTime<Utc>>) {
@@ -624,6 +696,38 @@ mod tests {
     }
 
     #[test]
+    fn is_native_first_type_accepts_modern_sessions_rejects_claude_mem() {
+        // Legacy / conversation openers — always accepted.
+        for ty in [
+            "user",
+            "assistant",
+            "system",
+            "summary",
+            "file-history-snapshot",
+        ] {
+            assert!(
+                is_native_first_type(Some(ty)),
+                "{ty} must count as a Claude Code session"
+            );
+        }
+        // Modern openers we must NOT reject (this is what broke real
+        // sessions before — 92 of the user's files started with
+        // permission-mode and were silently dropped, causing the Dashboard
+        // to appear frozen at an old token total).
+        for ty in ["permission-mode", "attachment", "progress", "worktree-state"] {
+            assert!(
+                is_native_first_type(Some(ty)),
+                "{ty} is a legit Claude Code opener in newer CLI versions"
+            );
+        }
+        // Known junk: claude-mem's observer queue writes into
+        // ~/.claude/projects/ but is not a session.
+        assert!(!is_native_first_type(Some("queue-operation")));
+        // Empty file — no type, no reason to pretend it's a session.
+        assert!(!is_native_first_type(None));
+    }
+
+    #[test]
     fn parses_summary() {
         let v = json!({"type": "summary", "summary": "Recap of prior conversation"});
         let ev = claude_event_from_line(&v).expect("event");
@@ -773,5 +877,107 @@ mod tests {
         let ev = claude_event_from_line(&v).expect("event");
         assert_eq!(ev.blocks.len(), 1);
         assert!(matches!(&ev.blocks[0], Block::Text(s) if s == "ok"));
+    }
+
+    fn empty_meta() -> SessionMeta {
+        SessionMeta {
+            agent: "claude",
+            id: String::new(),
+            path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            cwd: None,
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 0,
+            tokens: crate::adapter::types::TokenStats::default(),
+            status: SessionStatus::Unknown,
+            byte_offset: 0,
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn fold_claude_line_accumulates_message_usage_across_turns() {
+        let mut meta = empty_meta();
+        for n in [10u64, 20, 30] {
+            let v = json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "usage": {
+                        "input_tokens": n,
+                        "output_tokens": n / 2,
+                        "cache_read_input_tokens": 1,
+                        "cache_creation_input_tokens": 2,
+                    }
+                }
+            });
+            fold_claude_line(&v, &mut meta);
+        }
+        assert_eq!(meta.tokens.input, 60);
+        assert_eq!(meta.tokens.output, 30);
+        assert_eq!(meta.tokens.cache_read, 3);
+        assert_eq!(meta.tokens.cache_creation, 6);
+    }
+
+    #[test]
+    fn fold_claude_line_falls_back_to_tool_use_result_usage() {
+        let mut meta = empty_meta();
+        let v = json!({
+            "type": "user",
+            "toolUseResult": {
+                "usage": {
+                    "input_tokens": 5,
+                    "output_tokens": 7,
+                }
+            }
+        });
+        fold_claude_line(&v, &mut meta);
+        assert_eq!(meta.tokens.input, 5);
+        assert_eq!(meta.tokens.output, 7);
+    }
+
+    #[test]
+    fn fold_claude_line_total_tokens_fallback_routes_by_type() {
+        // Assistant → output
+        let mut meta = empty_meta();
+        let v = json!({
+            "type": "assistant",
+            "toolUseResult": { "totalTokens": 42 }
+        });
+        fold_claude_line(&v, &mut meta);
+        assert_eq!(meta.tokens.output, 42);
+        assert_eq!(meta.tokens.input, 0);
+
+        // Non-assistant → input
+        let mut meta = empty_meta();
+        let v = json!({
+            "type": "user",
+            "toolUseResult": { "totalTokens": 9 }
+        });
+        fold_claude_line(&v, &mut meta);
+        assert_eq!(meta.tokens.input, 9);
+        assert_eq!(meta.tokens.output, 0);
+    }
+
+    #[test]
+    fn fold_claude_line_prefers_message_usage_over_tool_use_result() {
+        // Ensures precedence: if message.usage exists, toolUseResult.usage on
+        // the same line (unusual but possible) must not double-count.
+        let mut meta = empty_meta();
+        let v = json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "usage": { "input_tokens": 100 }
+            },
+            "toolUseResult": {
+                "usage": { "input_tokens": 999 }
+            }
+        });
+        fold_claude_line(&v, &mut meta);
+        assert_eq!(meta.tokens.input, 100);
     }
 }

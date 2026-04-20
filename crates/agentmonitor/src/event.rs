@@ -12,7 +12,7 @@ use tokio::sync::Notify;
 
 use crate::adapter::{adapter_for_path, DynAdapter};
 use crate::app::{App, ConversationCache, ExpandMode, Mode, PreviewCache, Tab};
-use crate::collector::{fs_watch, proc_sampler};
+use crate::collector::{fs_watch, proc_sampler, token_refresh};
 use crate::tui::render;
 
 #[derive(Debug, Clone, Copy)]
@@ -34,6 +34,10 @@ pub async fn run_event_loop(
     _opts: EventLoopOptions,
 ) -> Result<()> {
     let dirty = Arc::new(Notify::new());
+    // Dedicated signal from fs_watch → token_refresh. Separate from `dirty`
+    // so a render-only notification doesn't spin the (heavier) token refresh
+    // loop, and a file change doesn't miss redraws.
+    let token_dirty = Arc::new(Notify::new());
 
     // Spawn background collectors. P1 uses the placeholder fs_watch; P3/P4
     // swap in notify-backed implementations without touching this function.
@@ -50,8 +54,18 @@ pub async fn run_event_loop(
     let adapters_fs = app.adapters.clone();
     let state_fs = state.clone();
     let dirty_fs = dirty.clone();
+    let token_dirty_fs = token_dirty.clone();
     tokio::spawn(async move {
-        fs_watch::run(adapters_fs, state_fs, dirty_fs).await;
+        fs_watch::run(adapters_fs, state_fs, token_dirty_fs, dirty_fs).await;
+    });
+
+    let adapters_tok = app.adapters.clone();
+    let state_tok = state.clone();
+    let cache_tok = app.token_cache.clone();
+    let dirty_tok = dirty.clone();
+    let token_dirty_tok = token_dirty.clone();
+    tokio::spawn(async move {
+        token_refresh::run(adapters_tok, state_tok, cache_tok, token_dirty_tok, dirty_tok).await;
     });
 
     let mut events = EventStream::new();
@@ -87,7 +101,9 @@ pub async fn run_event_loop(
 
 fn current_selected_path(app: &App) -> Option<PathBuf> {
     let s = app.state.read();
-    s.sessions.get(s.selected_session).map(|m| m.path.clone())
+    let visible = s.visible_session_indices(&app.session_filter, app.session_sort);
+    let row = visible.get(s.selected_session.min(visible.len().saturating_sub(1)))?;
+    s.sessions.get(*row).map(|m| m.path.clone())
 }
 
 /// Spawn a task to load the preview (last messages + full message count)
@@ -214,6 +230,12 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
 }
 
 fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {
+    // Sessions-tab filter input swallows printable keys, Backspace, Esc and
+    // Enter so they don't trigger normal-mode actions like quit / open viewer.
+    if app.session_filter_input && app.tab == Tab::Sessions {
+        handle_session_filter_input(code, app);
+        return false;
+    }
     match (code, modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
             app.should_quit = true;
@@ -224,23 +246,10 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
         (KeyCode::Char('1'), _) => app.set_tab(Tab::Dashboard),
         (KeyCode::Char('2'), _) => app.set_tab(Tab::Sessions),
         (KeyCode::Char('3'), _) => app.set_tab(Tab::Process),
-        (KeyCode::Char('j') | KeyCode::Down, _) => {
-            let mut s = app.state.write();
-            if !s.sessions.is_empty() && s.selected_session + 1 < s.sessions.len() {
-                s.selected_session += 1;
-            }
-        }
-        (KeyCode::Char('k') | KeyCode::Up, _) => {
-            let mut s = app.state.write();
-            if s.selected_session > 0 {
-                s.selected_session -= 1;
-            }
-        }
+        (KeyCode::Char('j') | KeyCode::Down, _) => move_selection(app, 1),
+        (KeyCode::Char('k') | KeyCode::Up, _) => move_selection(app, -1),
         (KeyCode::Enter, _) if app.tab == Tab::Sessions => {
-            let path = {
-                let s = app.state.read();
-                s.sessions.get(s.selected_session).map(|m| m.path.clone())
-            };
+            let path = current_selected_path(app);
             if let Some(p) = path {
                 {
                     let mut s = app.state.write();
@@ -250,8 +259,29 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
                 ensure_conversation(app, &p, false);
             }
         }
+        (KeyCode::Enter, _) if app.tab == Tab::Process => {
+            jump_to_process_session(app);
+        }
+        (KeyCode::Char('/'), _) if app.tab == Tab::Sessions => {
+            app.session_filter_input = true;
+            app.state.write().dirty = true;
+        }
+        (KeyCode::Char('s'), _) if app.tab == Tab::Sessions => {
+            app.session_sort = app.session_sort.cycle();
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+        }
+        (KeyCode::Char('c'), _) if app.tab == Tab::Sessions => {
+            app.session_filter.clear();
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+        }
         (KeyCode::Char('r'), _) => {
-            // Manual refresh — trigger a one-shot scan.
+            // Manual refresh — one-shot scan. Must not clobber tokens: the
+            // fast-parse path can't reproduce them, so preserve whatever
+            // token_refresh already wrote into state for each path.
             let state = app.state.clone();
             let adapters = app.adapters.clone();
             tokio::spawn(async move {
@@ -262,14 +292,132 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
                     }
                 }
                 fresh.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                let mut s = state.write();
-                s.sessions = fresh;
-                s.dirty = true;
+                fs_watch::replace_preserving_tokens(&state, fresh);
             });
         }
         _ => {}
     }
     false
+}
+
+/// Handle key events while the Sessions filter input is active. Esc cancels
+/// the filter, Enter commits it (leaving input mode), Backspace deletes, and
+/// any printable character is appended.
+fn handle_session_filter_input(code: KeyCode, app: &mut App) {
+    match code {
+        KeyCode::Esc => {
+            app.session_filter.clear();
+            app.session_filter_input = false;
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+        }
+        KeyCode::Enter => {
+            app.session_filter_input = false;
+            app.state.write().dirty = true;
+        }
+        KeyCode::Backspace => {
+            app.session_filter.pop();
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+        }
+        KeyCode::Char(c) if !c.is_control() => {
+            app.session_filter.push(c);
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+        }
+        _ => {}
+    }
+}
+
+fn move_selection(app: &mut App, delta: i32) {
+    match app.tab {
+        Tab::Sessions => {
+            let mut s = app.state.write();
+            let visible_len = s
+                .visible_session_indices(&app.session_filter, app.session_sort)
+                .len();
+            if visible_len == 0 {
+                return;
+            }
+            s.selected_session = clamp_step(s.selected_session, delta, visible_len);
+            s.dirty = true;
+        }
+        Tab::Process => {
+            let len = app.metrics.snapshot().len();
+            if len == 0 {
+                return;
+            }
+            app.selected_process = clamp_step(app.selected_process, delta, len);
+            app.state.write().dirty = true;
+        }
+        Tab::Dashboard => {}
+    }
+}
+
+fn clamp_step(cur: usize, delta: i32, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let max = len - 1;
+    if delta >= 0 {
+        (cur.saturating_add(delta as usize)).min(max)
+    } else {
+        cur.saturating_sub((-delta) as usize)
+    }
+}
+
+/// On Enter from Process tab, find a session whose `cwd` matches the selected
+/// process and jump to it in the Sessions tab. Best-effort: if no match, stay
+/// put. This is the cross-tab correlation that makes PIDs actionable.
+fn jump_to_process_session(app: &mut App) {
+    let procs = app.metrics.snapshot();
+    let Some(proc) = procs.get(app.selected_process) else {
+        return;
+    };
+    let Some(target_cwd) = proc.cwd.clone() else {
+        return;
+    };
+    let agent = proc.agent;
+    let target = {
+        let s = app.state.read();
+        // Among sessions with matching cwd+agent, prefer the most recently
+        // updated one — that's the active conversation the user just saw.
+        s.sessions
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.agent == agent
+                    && m.cwd
+                        .as_ref()
+                        .map(|p| p.to_string_lossy() == target_cwd)
+                        .unwrap_or(false)
+            })
+            .max_by_key(|(_, m)| m.updated_at)
+            .map(|(i, _)| i)
+    };
+    let Some(raw_idx) = target else { return };
+
+    app.tab = Tab::Sessions;
+    // Resolve raw_idx → visible row so selected_session indexes into what the
+    // user actually sees.
+    let mut s = app.state.write();
+    let visible = s.visible_session_indices(&app.session_filter, app.session_sort);
+    if let Some(row) = visible.iter().position(|&i| i == raw_idx) {
+        s.selected_session = row;
+    } else {
+        // Filter hides it: clear filter so the jump is visible.
+        drop(s);
+        app.session_filter.clear();
+        let mut s = app.state.write();
+        let visible = s.visible_session_indices(&app.session_filter, app.session_sort);
+        if let Some(row) = visible.iter().position(|&i| i == raw_idx) {
+            s.selected_session = row;
+        }
+    }
+    app.state.write().dirty = true;
 }
 
 fn handle_viewer(code: KeyCode, _modifiers: KeyModifiers, app: &mut App, _path: &Path) -> bool {

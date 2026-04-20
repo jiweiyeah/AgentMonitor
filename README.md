@@ -51,11 +51,21 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 | `1` / `2` / `3` | 切换 Dashboard / Sessions / Process 三个 tab |
 | `Tab` / `→` | 下一个 tab |
 | `Shift+Tab` / `←` | 上一个 tab |
-| `j` / `↓` | 向下选择 |
+| `j` / `↓` | 向下选择（Sessions / Process 当前 tab 的列表） |
 | `k` / `↑` | 向上选择 |
-| `Enter` | 在 Sessions tab 打开所选会话的完整对话查看器 |
+| `Enter` | Sessions tab:打开对话查看器；Process tab:跳转到该进程对应的 session |
 | `r` | 强制重扫会话 |
 | `q` / `Esc` / `Ctrl+C` | 退出 |
+
+### Sessions tab 专用
+
+| 按键 | 动作 |
+| --- | --- |
+| `/` | 进入过滤输入（按 cwd / session id / branch / agent 名子串匹配，不区分大小写） |
+| `s` | 循环切换排序（updated↓ → size↓ → msgs↓） |
+| `c` | 清除当前过滤 |
+
+过滤输入模式内:`Enter` 应用并退出输入,`Esc` 取消并清空,`Backspace` 删最后一个字符,其他字符追加。
 
 ### 对话查看器（Viewer 模式）
 

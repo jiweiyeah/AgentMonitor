@@ -3,6 +3,7 @@ pub mod detail;
 pub mod process;
 pub mod render;
 pub mod sessions;
+pub mod stats;
 pub mod theme;
 pub mod viewer;
 pub mod widgets;
