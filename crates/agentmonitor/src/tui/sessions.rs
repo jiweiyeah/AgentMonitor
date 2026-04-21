@@ -29,7 +29,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             let s = &state.sessions[i];
             let when = s
                 .updated_at
-                .map(|t| t.format("%m-%d %H:%M").to_string())
+                .map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| "-----".into());
             let line = Line::from(vec![
                 Span::styled(

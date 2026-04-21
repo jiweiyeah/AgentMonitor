@@ -134,7 +134,7 @@ fn render_header(
             m.cwd_display(),
             m.model.clone().unwrap_or_else(|| "-".into()),
             m.updated_at
-                .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| "-".into()),
         ),
         None => ("-".into(), "-".into(), "-".into(), "-".into(), "-".into()),
@@ -294,7 +294,7 @@ fn event_header(ev: &ConversationEvent) -> Line<'static> {
     };
     let when = ev
         .ts
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_default();
     Line::from(vec![
         Span::styled(format!("┌─[{}] ", ev.role.label()), role_style),

@@ -22,11 +22,11 @@ pub fn render(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&P
 fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&PreviewCache>) {
     let started = s
         .started_at
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| "-".into());
     let updated = s
         .updated_at
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_else(|| "-".into());
 
     // If the full parse has finished, prefer its message_count; otherwise
@@ -148,7 +148,7 @@ fn message_to_lines(m: &MessagePreview) -> Vec<Line<'static>> {
         _ => theme::muted(),
     };
     let when =
-        m.ts.map(|t| t.format("%m-%d %H:%M").to_string())
+        m.ts.map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "".into());
     let header = Line::from(vec![
         Span::styled(format!("[{}] ", m.role.label()), role_style),
