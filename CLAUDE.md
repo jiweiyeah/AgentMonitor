@@ -116,6 +116,59 @@ isn't enumerable.
   context every turn and most of it hits the prompt cache. The number is
   big but technically correct; unit is `K`/`M`/`B`.
 
+### 7. `updated_at` is monotone-nondecreasing within a fold pass
+
+`fold_claude_line` / `fold_codex_line` only move `updated_at` **forward**,
+never backward. `base_meta` seeds it with the file's current mtime; each
+line's `timestamp` is applied as `max(prev, new)`. Blindly overwriting
+was the historical bug: `parse_meta_fast` reads only ~8 header lines
+(Claude) or the first `session_meta` row (Codex), whose timestamps reflect
+the session's **creation**. Every fs_watch Modify event re-ran fast-parse
+and regressed `updated_at` to that creation time, so the Top Projects
+panel showed days-old ages for sessions that had just been appended to
+seconds ago. Parse_meta_full is unaffected either way — the *last* line's
+timestamp is also the max, so monotone folding produces the same result.
+
+If you ever need a non-monotone "last seen timestamp per line" (e.g.,
+detecting out-of-order writes), add a separate field — don't regress the
+meaning of `updated_at`.
+
+### 8. `scan_all` must cap FD concurrency
+
+`adapter::{claude,codex}::scan_all` use `buffer_unordered(16)` instead of
+`join_all`. With hundreds of session files on disk, `join_all` tried to
+open every file simultaneously and exhausted the process's FD table — a
+meaningful fraction of `parse_meta_fast` calls failed with EMFILE, and
+those sessions vanished from `state.sessions` silently. In the TUI this
+showed up as Top Projects counts that were a fraction of reality (e.g. a
+ZenNote bucket showing 14 instead of 155) and, because the *newest*
+file was often one of the dropped ones, ages drifted to the *second*
+newest session's `updated_at` — days or weeks stale. 16 matches
+`token_refresh::CONCURRENCY`; the two backgrounds coexist at ≤32 open
+FDs.
+
+`--once-and-exit` happens to survive with `join_all` because it's a
+one-shot with no other FD pressure, which made the bug invisible to
+benchmark output — always reproduce against the long-running TUI.
+
+### 9. Reconcile is a merge, not a replace
+
+`fs_watch::replace_preserving_tokens` is misnamed for historical reasons
+— it's actually a merge. Fresh scan_all output adds-and-updates; it
+never deletes. Deletion flows exclusively through fs_watch's
+`EventKind::Remove` branch.
+
+The reason: `parse_meta_fast` can fail transiently — a file being
+rewritten by `/compact` hands us a mid-write snapshot that isn't valid
+JSONL, an active writer has the file truncated for a brief window, or
+we race EOF on a partial line. Every such failure drops that session
+from `fresh`. With replace semantics, the session would vanish from
+state until the next notify Modify event pushed it back, and Top
+Projects `latest` would flip to the *second-newest* session's
+`updated_at` on every reconcile tick. Carrying forward prev-only
+sessions costs nothing (they'll be refreshed next reconcile or
+corrected on the next real write) and buys stability.
+
 ## Debugging loop
 
 `cargo run -p agentmonitor --release -- --debug` writes

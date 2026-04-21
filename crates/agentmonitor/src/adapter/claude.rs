@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::stream::StreamExt;
 use serde_json::Value;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -148,10 +149,19 @@ impl AgentAdapter for ClaudeAdapter {
             .collect();
 
         let this = self;
-        let futures = files
-            .into_iter()
-            .map(|p| async move { (p.clone(), this.parse_meta_fast(&p).await) });
-        let results = futures::future::join_all(futures).await;
+        // Cap concurrency. `join_all` with ~hundreds of files spawned a
+        // future-per-file and tried to hold every FD at once — on macOS the
+        // default is 256 and we blew past it, so ~40% of sessions failed
+        // their fast-parse with EMFILE-equivalent errors. Those silent
+        // failures show up in the TUI as a Top Projects bucket with a
+        // fraction of its real session count, and the max updated_at skewed
+        // to old sessions because the newest was often one of the dropped
+        // ones. 16 matches token_refresh::CONCURRENCY — same headroom story.
+        let results: Vec<(PathBuf, Result<SessionMeta>)> = futures::stream::iter(files)
+            .map(|p| async move { (p.clone(), this.parse_meta_fast(&p).await) })
+            .buffer_unordered(16)
+            .collect()
+            .await;
         let mut out = Vec::with_capacity(results.len());
         for (path, res) in results {
             match res {
@@ -261,7 +271,19 @@ fn fold_claude_line(v: &Value, meta: &mut SessionMeta) {
     }
     if let Some(ts) = v.get("timestamp").and_then(|s| s.as_str()) {
         if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-            meta.updated_at = Some(dt.with_timezone(&Utc));
+            let new = dt.with_timezone(&Utc);
+            // Monotone: only move `updated_at` forward. parse_meta_fast reads
+            // the first ~8 header lines, whose timestamps are from when the
+            // session was *created*. If we blindly overwrote, fs_watch's
+            // fast-parse on every Modify event would regress `updated_at` to
+            // the header time, making an actively-appended long-running
+            // session look days stale on the Dashboard's Top Projects list.
+            // The fresh mtime that `base_meta` seeded stays in place unless a
+            // line genuinely carries a later timestamp.
+            meta.updated_at = Some(match meta.updated_at {
+                Some(prev) if prev >= new => prev,
+                _ => new,
+            });
         }
     }
     if let Some(msg) = v.get("message") {
@@ -979,5 +1001,60 @@ mod tests {
         });
         fold_claude_line(&v, &mut meta);
         assert_eq!(meta.tokens.input, 100);
+    }
+
+    #[test]
+    fn fold_claude_line_updated_at_is_monotone_nondecreasing() {
+        // Regression: parse_meta_fast reads ~8 header lines whose timestamps
+        // belong to the session's *creation*. Blindly overwriting updated_at
+        // caused fs_watch events on a long-running session to regress it to
+        // the creation time, making the Top Projects panel show days-old ages
+        // for sessions that were just appended to. Monotone update preserves
+        // the fresher mtime that base_meta seeded.
+        let mtime = DateTime::parse_from_rfc3339("2026-04-21T00:03:07Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let old_header_ts = "2026-04-14T09:30:00Z";
+
+        let mut meta = empty_meta();
+        meta.updated_at = Some(mtime);
+
+        let v = json!({
+            "type": "attachment",
+            "timestamp": old_header_ts,
+        });
+        fold_claude_line(&v, &mut meta);
+
+        assert_eq!(
+            meta.updated_at,
+            Some(mtime),
+            "older header timestamp must not regress updated_at below mtime"
+        );
+    }
+
+    #[test]
+    fn fold_claude_line_updated_at_advances_on_newer_timestamp() {
+        // The common parse_meta_full case: we walk every line. When a later
+        // line carries a newer timestamp (the normal monotonic append), we
+        // must take it — otherwise parse_meta_full would freeze updated_at at
+        // the mtime seed and ignore what the file actually says.
+        let mtime = DateTime::parse_from_rfc3339("2026-04-20T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let newer = "2026-04-21T12:00:00Z";
+
+        let mut meta = empty_meta();
+        meta.updated_at = Some(mtime);
+
+        let v = json!({
+            "type": "assistant",
+            "timestamp": newer,
+        });
+        fold_claude_line(&v, &mut meta);
+
+        let expected = DateTime::parse_from_rfc3339(newer)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(meta.updated_at, Some(expected));
     }
 }

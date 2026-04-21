@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use futures::stream::StreamExt;
 use serde_json::Value;
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -137,10 +138,13 @@ impl AgentAdapter for CodexAdapter {
             .collect();
 
         let this = self;
-        let futures = files
-            .into_iter()
-            .map(|p| async move { (p.clone(), this.parse_meta_fast(&p).await) });
-        let results = futures::future::join_all(futures).await;
+        // See claude.rs: cap concurrency so fast-parse doesn't starve the FD
+        // table when the user has hundreds of rollout files.
+        let results: Vec<(PathBuf, Result<SessionMeta>)> = futures::stream::iter(files)
+            .map(|p| async move { (p.clone(), this.parse_meta_fast(&p).await) })
+            .buffer_unordered(16)
+            .collect()
+            .await;
         let mut out = Vec::with_capacity(results.len());
         for (path, res) in results {
             match res {
@@ -273,7 +277,15 @@ fn fold_codex_line(v: &Value, meta: &mut SessionMeta) {
     }
     if let Some(ts) = v.get("timestamp").and_then(|s| s.as_str()) {
         if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
-            meta.updated_at = Some(dt.with_timezone(&Utc));
+            let new = dt.with_timezone(&Utc);
+            // Monotone: see note in claude.rs. Codex's parse_meta_fast reads
+            // only the first `session_meta` line, whose timestamp is the
+            // session's creation time. Overwriting blindly would make
+            // fs_watch events regress updated_at on every Modify.
+            meta.updated_at = Some(match meta.updated_at {
+                Some(prev) if prev >= new => prev,
+                _ => new,
+            });
         }
     }
     // Codex emits an `event_msg` with `payload.type == "token_count"` after
@@ -701,5 +713,50 @@ mod tests {
         });
         fold_codex_line(&v, &mut meta);
         assert_eq!(meta.tokens.input, 50);
+    }
+
+    #[test]
+    fn fold_codex_line_updated_at_is_monotone_nondecreasing() {
+        // Codex's parse_meta_fast reads only the session_meta line, whose
+        // timestamp is the session's creation time. Blindly overwriting
+        // regresses updated_at on every fs_watch Modify event and makes
+        // Top Projects ages drift to the session-start time.
+        let mtime = DateTime::parse_from_rfc3339("2026-04-21T00:03:07Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let old_header_ts = "2026-04-14T09:30:00Z";
+
+        let mut meta = empty_meta();
+        meta.updated_at = Some(mtime);
+
+        let v = serde_json::json!({
+            "type": "session_meta",
+            "timestamp": old_header_ts,
+        });
+        fold_codex_line(&v, &mut meta);
+
+        assert_eq!(meta.updated_at, Some(mtime));
+    }
+
+    #[test]
+    fn fold_codex_line_updated_at_advances_on_newer_timestamp() {
+        let mtime = DateTime::parse_from_rfc3339("2026-04-20T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let newer = "2026-04-21T12:00:00Z";
+
+        let mut meta = empty_meta();
+        meta.updated_at = Some(mtime);
+
+        let v = serde_json::json!({
+            "type": "event_msg",
+            "timestamp": newer,
+        });
+        fold_codex_line(&v, &mut meta);
+
+        let expected = DateTime::parse_from_rfc3339(newer)
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(meta.updated_at, Some(expected));
     }
 }

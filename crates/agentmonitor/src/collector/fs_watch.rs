@@ -195,9 +195,16 @@ async fn update_for_path(
     true
 }
 
-/// Replace `sessions` with `fresh` while carrying over existing tokens and
-/// message_count by path. Fast-parse results from `scan_all` never flow into
-/// those fields — token_refresh owns them exclusively.
+/// Merge `fresh` into `sessions`, preserving tokens/message_count by path
+/// and — crucially — carrying over any session that exists in `state` but is
+/// missing from `fresh`. Fast-parse is not a deletion oracle: one failed
+/// `parse_meta_fast` (EMFILE race, momentary EOF mid-`/compact`, a reader
+/// hitting a partial line during active writes) would drop a session from
+/// `fresh`, and a replace-based reconcile would then evict it until the
+/// next Modify event pushed it back in. That flap was visible as Top
+/// Projects `latest` jumping to the *second-newest* session's timestamp
+/// every ~10s. File removal is handled authoritatively via fs_watch's
+/// `EventKind::Remove` branch; reconcile only adds/updates, never deletes.
 pub(crate) fn replace_preserving_tokens(state: &Arc<RwLock<AppState>>, mut fresh: Vec<SessionMeta>) {
     // Normalize on the way in so every stored SessionMeta uses the
     // `/Users/...` form even if something (e.g. a symlinked config dir) fed
@@ -206,31 +213,43 @@ pub(crate) fn replace_preserving_tokens(state: &Arc<RwLock<AppState>>, mut fresh
         meta.path = normalize_fs_path(std::mem::take(&mut meta.path));
     }
     let mut s = state.write();
-    let prev: HashMap<PathBuf, (TokenStats, usize)> = s
+    // Drain prev into a by-path map so we can (a) look up tokens to
+    // preserve, and (b) harvest the sessions that fresh didn't report.
+    let mut prev: HashMap<PathBuf, SessionMeta> = s
         .sessions
-        .iter()
-        .map(|m| (m.path.clone(), (m.tokens.clone(), m.message_count)))
+        .drain(..)
+        .map(|m| (m.path.clone(), m))
         .collect();
+
+    let mut merged: Vec<SessionMeta> = Vec::with_capacity(prev.len().max(fresh.len()));
     let mut preserved = 0usize;
     let mut new_paths = 0usize;
-    for meta in &mut fresh {
-        if let Some((tok, cnt)) = prev.get(&meta.path) {
-            meta.tokens = tok.clone();
-            meta.message_count = *cnt;
+    for mut meta in fresh {
+        if let Some(existing) = prev.remove(&meta.path) {
+            meta.tokens = existing.tokens;
+            meta.message_count = existing.message_count;
             preserved += 1;
         } else {
             meta.tokens = TokenStats::default();
             meta.message_count = 0;
             new_paths += 1;
         }
+        merged.push(meta);
+    }
+    // Anything still in `prev` was in state but absent from fresh. Keep it
+    // — see the doc comment above for why this is the right call.
+    let carried = prev.len();
+    for (_, meta) in prev {
+        merged.push(meta);
     }
     tracing::info!(
         preserved,
         new_paths,
-        total = fresh.len(),
-        "fs_watch: reconcile replaced sessions"
+        carried,
+        total = merged.len(),
+        "fs_watch: reconcile merged sessions"
     );
-    s.sessions = fresh;
+    s.sessions = merged;
     s.dirty = true;
 }
 
@@ -287,7 +306,7 @@ async fn fallback_only(
 mod tests {
     use super::*;
     use crate::adapter::types::SessionStatus;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn sess(path: &str, input: u64, msg_count: usize) -> SessionMeta {
         SessionMeta {
@@ -374,6 +393,40 @@ mod tests {
         let s = state.read();
         assert_eq!(s.sessions[0].tokens.input, 100);
         assert_eq!(s.sessions[0].message_count, 5);
+    }
+
+    #[test]
+    fn reconcile_carries_forward_sessions_missing_from_fresh() {
+        // Regression: a transient parse_meta_fast failure (FD pressure,
+        // partial read mid-write, /compact in progress) can leave `fresh`
+        // short one or more sessions that really do exist. Before, reconcile
+        // did a full replace and the missing session disappeared from state
+        // until the next notify Modify event pushed it back, causing Top
+        // Projects ages to flip to the *second-newest* session every ~10s.
+        // Now reconcile is a merge: scan_all adds/updates only, deletion is
+        // the sole job of EventKind::Remove.
+        let state = Arc::new(RwLock::new(AppState::default()));
+        state.write().sessions = vec![
+            sess("/a", 1_000, 10),
+            sess("/b", 2_000, 20), // flaky: scan_all failed to parse this pass
+            sess("/c", 3_000, 30),
+        ];
+
+        let fresh = vec![sess("/a", 0, 0), sess("/c", 0, 0)]; // /b missing
+        replace_preserving_tokens(&state, fresh);
+
+        let s = state.read();
+        let paths: Vec<_> = s
+            .sessions
+            .iter()
+            .map(|m| m.path.display().to_string())
+            .collect();
+        assert!(paths.contains(&"/a".to_string()));
+        assert!(paths.contains(&"/b".to_string()), "missing-from-fresh session must be carried forward");
+        assert!(paths.contains(&"/c".to_string()));
+        let b = s.sessions.iter().find(|m| m.path == Path::new("/b")).unwrap();
+        assert_eq!(b.tokens.input, 2_000, "carried-forward session keeps its prior tokens");
+        assert_eq!(b.message_count, 20);
     }
 
     #[test]
