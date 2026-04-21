@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::Terminal;
 
 use crate::app::{App, Mode, Tab};
-use crate::tui::{dashboard, process, sessions, theme, viewer};
+use crate::tui::{dashboard, sessions, theme, viewer};
 
 /// Full-frame draw. Called on every input event and every `dirty` notify.
 pub async fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> Result<()> {
@@ -59,7 +59,6 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     match app.tab {
         Tab::Dashboard => dashboard::render(frame, chunks[1], app),
         Tab::Sessions => sessions::render(frame, chunks[1], app),
-        Tab::Process => process::render(frame, chunks[1], app),
     }
 
     // ── footer hint ─────────────────────────────────────
@@ -92,11 +91,10 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(" Enter ", Style::default()));
                 spans.push(Span::styled("open viewer ", theme::muted()));
             }
-            Tab::Process => {
+            Tab::Dashboard => {
                 spans.push(Span::styled(" Enter ", Style::default()));
                 spans.push(Span::styled("jump to session ", theme::muted()));
             }
-            Tab::Dashboard => {}
         }
     }
     let footer = Paragraph::new(Line::from(spans));

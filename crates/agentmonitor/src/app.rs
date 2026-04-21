@@ -12,44 +12,39 @@ use crate::collector::metrics::MetricsStore;
 use crate::collector::token_refresh::TokenCache;
 use crate::config::Config;
 
-/// Active tab in the TUI.
+/// Active tab in the TUI. Process details used to live in their own tab but
+/// are now embedded in the Dashboard — the old `Tab::Process` was redundant
+/// with the Overview summary, which already carried the same live-count/RSS
+/// snapshot the Process tab was showing in its header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Dashboard,
     Sessions,
-    Process,
 }
 
 impl Tab {
-    pub fn all() -> [Tab; 3] {
-        [Tab::Dashboard, Tab::Sessions, Tab::Process]
+    pub fn all() -> [Tab; 2] {
+        [Tab::Dashboard, Tab::Sessions]
     }
     pub fn title(self) -> &'static str {
         match self {
             Tab::Dashboard => "Dashboard",
             Tab::Sessions => "Sessions",
-            Tab::Process => "Process",
         }
     }
     pub fn next(self) -> Tab {
         match self {
             Tab::Dashboard => Tab::Sessions,
-            Tab::Sessions => Tab::Process,
-            Tab::Process => Tab::Dashboard,
+            Tab::Sessions => Tab::Dashboard,
         }
     }
     pub fn prev(self) -> Tab {
-        match self {
-            Tab::Dashboard => Tab::Process,
-            Tab::Sessions => Tab::Dashboard,
-            Tab::Process => Tab::Sessions,
-        }
+        self.next() // two tabs — next and prev are the same toggle.
     }
     pub fn index(self) -> usize {
         match self {
             Tab::Dashboard => 0,
             Tab::Sessions => 1,
-            Tab::Process => 2,
         }
     }
 }

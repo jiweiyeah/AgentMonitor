@@ -20,8 +20,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),  // Overview
-            Constraint::Min(6),     // Activity + Top projects row
+            Constraint::Length(5),                             // Overview
+            Constraint::Min(6),                                // Activity + Top projects row
+            Constraint::Min(4),                                // Live Processes table
             Constraint::Length(4 + app.adapters.len() as u16), // Tokens-by-agent strip
         ])
         .split(area);
@@ -90,7 +91,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let projects = top_projects(&sessions, top_n.max(1));
     render_top_projects(frame, middle[1], &projects, now);
 
-    render_tokens_by_agent(frame, chunks[2], &agent_rows);
+    crate::tui::process::render(frame, chunks[2], app);
+
+    render_tokens_by_agent(frame, chunks[3], &agent_rows);
 }
 
 struct OverviewData<'a> {

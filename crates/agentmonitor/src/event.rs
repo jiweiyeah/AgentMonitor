@@ -245,7 +245,6 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
         (KeyCode::BackTab, _) | (KeyCode::Left, _) => app.cycle_tab_prev(),
         (KeyCode::Char('1'), _) => app.set_tab(Tab::Dashboard),
         (KeyCode::Char('2'), _) => app.set_tab(Tab::Sessions),
-        (KeyCode::Char('3'), _) => app.set_tab(Tab::Process),
         (KeyCode::Char('j') | KeyCode::Down, _) => move_selection(app, 1),
         (KeyCode::Char('k') | KeyCode::Up, _) => move_selection(app, -1),
         (KeyCode::Enter, _) if app.tab == Tab::Sessions => {
@@ -259,7 +258,9 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
                 ensure_conversation(app, &p, false);
             }
         }
-        (KeyCode::Enter, _) if app.tab == Tab::Process => {
+        (KeyCode::Enter, _) if app.tab == Tab::Dashboard => {
+            // Dashboard now embeds the processes table, so Enter jumps to
+            // the session whose cwd matches the highlighted process row.
             jump_to_process_session(app);
         }
         (KeyCode::Char('/'), _) if app.tab == Tab::Sessions => {
@@ -345,7 +346,9 @@ fn move_selection(app: &mut App, delta: i32) {
             s.selected_session = clamp_step(s.selected_session, delta, visible_len);
             s.dirty = true;
         }
-        Tab::Process => {
+        Tab::Dashboard => {
+            // Dashboard embeds the processes table; j/k walks its rows so
+            // Enter's "jump to session" action still targets a real row.
             let len = app.metrics.snapshot().len();
             if len == 0 {
                 return;
@@ -353,7 +356,6 @@ fn move_selection(app: &mut App, delta: i32) {
             app.selected_process = clamp_step(app.selected_process, delta, len);
             app.state.write().dirty = true;
         }
-        Tab::Dashboard => {}
     }
 }
 
@@ -369,9 +371,10 @@ fn clamp_step(cur: usize, delta: i32, len: usize) -> usize {
     }
 }
 
-/// On Enter from Process tab, find a session whose `cwd` matches the selected
-/// process and jump to it in the Sessions tab. Best-effort: if no match, stay
-/// put. This is the cross-tab correlation that makes PIDs actionable.
+/// On Enter from the Dashboard tab, find a session whose `cwd` matches the
+/// currently highlighted process row and jump to it in the Sessions tab.
+/// Best-effort: if no match, stay put. This is the cross-tab correlation
+/// that makes PIDs actionable from the dashboard's embedded processes table.
 fn jump_to_process_session(app: &mut App) {
     let procs = app.metrics.snapshot();
     let Some(proc) = procs.get(app.selected_process) else {
