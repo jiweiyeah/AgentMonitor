@@ -30,3 +30,4 @@ walkdir = "2"
 async-trait = "0.1"
 parking_lot = "0.12"
 futures = { version = "0.3", default-features = false, features = ["std"] }
+unicode-width = "0.2"

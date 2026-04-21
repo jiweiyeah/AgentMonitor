@@ -35,6 +35,18 @@ impl TokenStats {
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_creation
     }
+
+    /// Total that respects the user's `include_cache_in_total` preference.
+    /// When cache is excluded, returns input + output only — closer to what
+    /// most users mean by "tokens I spent". Kept on the struct rather than
+    /// in the dashboard module so the viewer and detail pane can reuse it.
+    pub fn total_with_preference(&self, include_cache: bool) -> u64 {
+        if include_cache {
+            self.total()
+        } else {
+            self.input + self.output
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

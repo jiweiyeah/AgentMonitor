@@ -6,6 +6,7 @@ use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::i18n::t;
 use crate::tui::theme;
 use crate::tui::widgets::human_bytes;
 
@@ -18,13 +19,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     if procs.is_empty() {
         let empty = Paragraph::new(Line::from(Span::styled(
-            "No agent processes detected. Start claude / codex in another terminal.",
+            t("process.no_live"),
             theme::muted(),
         )))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" Live Processes ", theme::title())),
+                .title(Span::styled(t("process.title"), theme::title())),
         );
         frame.render_widget(empty, area);
         return;
@@ -96,7 +97,7 @@ fn render_table(
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" Live Processes ", theme::title())),
+                .title(Span::styled(t("process.title"), theme::title())),
         )
         .row_highlight_style(theme::selected())
         .highlight_symbol("▶ ");

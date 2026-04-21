@@ -4,4 +4,6 @@ pub mod app;
 pub mod collector;
 pub mod config;
 pub mod event;
+pub mod i18n;
+pub mod settings;
 pub mod tui;

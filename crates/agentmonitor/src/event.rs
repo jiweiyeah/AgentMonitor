@@ -14,6 +14,7 @@ use crate::adapter::{adapter_for_path, DynAdapter};
 use crate::app::{App, ConversationCache, ExpandMode, Mode, PreviewCache, Tab};
 use crate::collector::{fs_watch, proc_sampler, token_refresh};
 use crate::tui::render;
+use crate::tui::settings::SettingsItem;
 
 #[derive(Debug, Clone, Copy)]
 pub struct EventLoopOptions {
@@ -241,12 +242,24 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
             app.should_quit = true;
             return true;
         }
-        (KeyCode::Tab, _) | (KeyCode::Right, _) => app.cycle_tab_next(),
-        (KeyCode::BackTab, _) | (KeyCode::Left, _) => app.cycle_tab_prev(),
+        (KeyCode::Tab, _) => app.cycle_tab_next(),
+        (KeyCode::BackTab, _) => app.cycle_tab_prev(),
         (KeyCode::Char('1'), _) => app.set_tab(Tab::Dashboard),
         (KeyCode::Char('2'), _) => app.set_tab(Tab::Sessions),
+        (KeyCode::Char('3'), _) => app.set_tab(Tab::Settings),
         (KeyCode::Char('j') | KeyCode::Down, _) => move_selection(app, 1),
         (KeyCode::Char('k') | KeyCode::Up, _) => move_selection(app, -1),
+        (KeyCode::Right, _) if app.tab == Tab::Settings => {
+            cycle_selected_setting(app, true);
+        }
+        (KeyCode::Left, _) if app.tab == Tab::Settings => {
+            cycle_selected_setting(app, false);
+        }
+        (KeyCode::Enter, _) if app.tab == Tab::Settings => {
+            cycle_selected_setting(app, true);
+        }
+        (KeyCode::Right, _) => app.cycle_tab_next(),
+        (KeyCode::Left, _) => app.cycle_tab_prev(),
         (KeyCode::Enter, _) if app.tab == Tab::Sessions => {
             let path = current_selected_path(app);
             if let Some(p) = path {
@@ -279,6 +292,13 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
             s.selected_session = 0;
             s.dirty = true;
         }
+        (KeyCode::Char('r'), _) if app.tab == Tab::Settings => {
+            // Settings tab reuses `r` as reset-to-defaults rather than the
+            // global rescan shortcut — rescanning from here doesn't help the
+            // user tweak preferences.
+            crate::tui::settings::reset_to_defaults();
+            app.state.write().dirty = true;
+        }
         (KeyCode::Char('r'), _) => {
             // Manual refresh — one-shot scan. Must not clobber tokens: the
             // fast-parse path can't reproduce them, so preserve whatever
@@ -299,6 +319,20 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
         _ => {}
     }
     false
+}
+
+fn cycle_selected_setting(app: &mut App, forward: bool) {
+    let items = SettingsItem::all();
+    if items.is_empty() {
+        return;
+    }
+    let idx = app.selected_setting.min(items.len() - 1);
+    if forward {
+        items[idx].cycle_forward();
+    } else {
+        items[idx].cycle_back();
+    }
+    app.state.write().dirty = true;
 }
 
 /// Handle key events while the Sessions filter input is active. Esc cancels
@@ -354,6 +388,14 @@ fn move_selection(app: &mut App, delta: i32) {
                 return;
             }
             app.selected_process = clamp_step(app.selected_process, delta, len);
+            app.state.write().dirty = true;
+        }
+        Tab::Settings => {
+            let len = SettingsItem::all().len();
+            if len == 0 {
+                return;
+            }
+            app.selected_setting = clamp_step(app.selected_setting, delta, len);
             app.state.write().dirty = true;
         }
     }

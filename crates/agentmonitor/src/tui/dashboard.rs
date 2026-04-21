@@ -9,12 +9,14 @@ use ratatui::Frame;
 
 use crate::adapter::types::agent_display_name;
 use crate::app::App;
+use crate::i18n::t;
+use crate::settings::{self, TokenUnit};
 use crate::tui::stats::{
     activity_buckets, aggregate_rss_buckets, tokens_by_agent, top_projects, AgentTokenRow,
     ProjectRow,
 };
 use crate::tui::theme;
-use crate::tui::widgets::{braille_spark, human_bytes, trend_arrow};
+use crate::tui::widgets::{braille_spark, human_bytes, pad_display_width, trend_arrow};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
@@ -48,7 +50,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let agent_ids: Vec<&'static str> = app.adapters.iter().map(|a| a.id()).collect();
     let agent_rows = tokens_by_agent(&sessions, &agent_ids);
-    let total_tokens: u64 = agent_rows.iter().map(|r| r.tokens.total()).sum();
+    let include_cache = settings::get().include_cache_in_total;
+    let total_tokens: u64 = agent_rows
+        .iter()
+        .map(|r| r.tokens.total_with_preference(include_cache))
+        .sum();
 
     let procs = app.metrics.snapshot();
     let total_rss = app.metrics.total_rss_kb();
@@ -120,25 +126,28 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("Sessions  ", theme::muted()),
+            Span::styled(pad_display_width(t("dashboard.sessions"), 10), theme::muted()),
             bold(format!("{}", d.total_sessions)),
-            Span::styled("   last24h  ", theme::muted()),
+            Span::styled(
+                format!("   {}", pad_display_width(t("dashboard.last24h"), 10)),
+                theme::muted(),
+            ),
             Span::styled(
                 format!("{}", d.last24h),
                 Style::default()
                     .fg(theme::SUCCESS)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   Σ tokens  ", theme::muted()),
+            Span::styled(format!("   {}  ", t("dashboard.total_tokens")), theme::muted()),
             Span::styled(
                 format_token_count(d.total_tokens),
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
         ]),
         Line::from(vec![
-            Span::styled("Agents    ", theme::muted()),
+            Span::styled(pad_display_width(t("dashboard.agents"), 10), theme::muted()),
             Span::raw(agent_summary),
         ]),
         Line::from(process_row_spans(&d)),
@@ -147,7 +156,7 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
     let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(" Overview ", theme::title())),
+            .title(Span::styled(t("dashboard.overview"), theme::title())),
     );
     frame.render_widget(widget, area);
 }
@@ -157,11 +166,11 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
 /// stays readable; there are otherwise 10+ pieces on one line.
 fn process_row_spans(d: &OverviewData<'_>) -> Vec<Span<'static>> {
     let accent_bold = Style::default()
-        .fg(theme::ACCENT)
+        .fg(theme::accent())
         .add_modifier(Modifier::BOLD);
     vec![
-        Span::styled("Process   ", theme::muted()),
-        bold(format!("{} live", d.live_pids)),
+        Span::styled(pad_display_width(t("dashboard.process"), 10), theme::muted()),
+        bold(format!("{} {}", d.live_pids, t("dashboard.live"))),
         Span::styled(" · ", theme::muted()),
         Span::styled(human_bytes(d.total_rss_kb), accent_bold),
         Span::raw(" "),
@@ -169,7 +178,7 @@ fn process_row_spans(d: &OverviewData<'_>) -> Vec<Span<'static>> {
         Span::raw("  "),
         Span::styled(
             braille_spark(d.rss_trend, 20),
-            Style::default().fg(theme::ACCENT),
+            Style::default().fg(theme::accent()),
         ),
         Span::raw("  "),
         Span::styled(
@@ -211,7 +220,7 @@ fn format_range(min_kb: u64, max_kb: u64) -> String {
 fn render_activity(frame: &mut Frame, area: Rect, hist: &[u64], now: DateTime<Utc>) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" 24h Activity ", theme::title()));
+        .title(Span::styled(t("dashboard.activity"), theme::title()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -267,7 +276,7 @@ fn render_activity(frame: &mut Frame, area: Rect, hist: &[u64], now: DateTime<Ut
                     };
                     if fill > 0 {
                         cell.set_symbol(BLOCKS[fill])
-                            .set_style(Style::default().fg(theme::ACCENT));
+                            .set_style(Style::default().fg(theme::accent()));
                     } else if is_empty && is_baseline && dx == (bar_w / 2) as u16 {
                         // Dim baseline marker keeps empty hours anchored under
                         // their tick so sparse days remain readable.
@@ -329,7 +338,7 @@ fn render_activity(frame: &mut Frame, area: Rect, hist: &[u64], now: DateTime<Ut
         };
         let total: u64 = hist.iter().sum();
         let caption = Line::from(vec![Span::styled(
-            format!("Σ {total} sessions"),
+            format!("Σ {total} {}", t("dashboard.sessions_sum")),
             theme::muted(),
         )]);
         frame.render_widget(Paragraph::new(caption), caption_area);
@@ -344,7 +353,7 @@ fn render_top_projects(
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(Span::styled(" Top Projects ", theme::title()));
+        .title(Span::styled(t("dashboard.top_projects"), theme::title()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -354,7 +363,7 @@ fn render_top_projects(
 
     if rows.is_empty() {
         let hint = Paragraph::new(Line::from(Span::styled(
-            "No sessions yet — start `claude` or `codex` in a project.",
+            t("dashboard.no_sessions"),
             theme::muted(),
         )));
         frame.render_widget(hint, inner);
@@ -399,26 +408,26 @@ fn render_tokens_by_agent(frame: &mut Frame, area: Rect, rows: &[AgentTokenRow])
         ),
     ]));
     for r in rows {
-        let t = &r.tokens;
+        let tok = &r.tokens;
         lines.push(Line::from(vec![
             Span::styled(
                 format!("{:<12} ", agent_display_name(r.agent)),
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("{:>4}  ", r.sessions), Style::default().fg(Color::White)),
             Span::raw(format!(
                 "{:>9}  {:>9}  {:>9}  {:>9}  ",
-                format_token_count(t.input),
-                format_token_count(t.output),
-                format_token_count(t.cache_read),
-                format_token_count(t.cache_creation),
+                format_token_count(tok.input),
+                format_token_count(tok.output),
+                format_token_count(tok.cache_read),
+                format_token_count(tok.cache_creation),
             )),
             Span::styled(
-                format!("{:>9}", format_token_count(t.total())),
+                format!("{:>9}", format_token_count(tok.total_with_preference(settings::get().include_cache_in_total))),
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -427,7 +436,7 @@ fn render_tokens_by_agent(frame: &mut Frame, area: Rect, rows: &[AgentTokenRow])
     let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(" Tokens by agent ", theme::title())),
+            .title(Span::styled(t("dashboard.tokens_by_agent"), theme::title())),
     );
     frame.render_widget(widget, area);
 }
@@ -442,14 +451,31 @@ fn bold(text: String) -> Span<'static> {
 }
 
 fn format_token_count(n: u64) -> String {
-    if n < 1000 {
-        format!("{n}")
-    } else if n < 1_000_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
-    } else if n < 1_000_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    } else {
-        format!("{:.2}B", n as f64 / 1_000_000_000.0)
+    match settings::get().token_unit {
+        TokenUnit::Raw => {
+            // Thousands separators so eight-digit totals stay scannable.
+            let s = n.to_string();
+            let bytes = s.as_bytes();
+            let mut out = String::with_capacity(s.len() + s.len() / 3);
+            for (i, b) in bytes.iter().enumerate() {
+                if i > 0 && (bytes.len() - i) % 3 == 0 {
+                    out.push(',');
+                }
+                out.push(*b as char);
+            }
+            out
+        }
+        TokenUnit::Compact => {
+            if n < 1000 {
+                format!("{n}")
+            } else if n < 1_000_000 {
+                format!("{:.1}K", n as f64 / 1_000.0)
+            } else if n < 1_000_000_000 {
+                format!("{:.1}M", n as f64 / 1_000_000.0)
+            } else {
+                format!("{:.2}B", n as f64 / 1_000_000_000.0)
+            }
+        }
     }
 }
 

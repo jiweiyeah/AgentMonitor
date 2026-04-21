@@ -20,31 +20,39 @@ use crate::config::Config;
 pub enum Tab {
     Dashboard,
     Sessions,
+    Settings,
 }
 
 impl Tab {
-    pub fn all() -> [Tab; 2] {
-        [Tab::Dashboard, Tab::Sessions]
+    pub fn all() -> [Tab; 3] {
+        [Tab::Dashboard, Tab::Sessions, Tab::Settings]
     }
     pub fn title(self) -> &'static str {
         match self {
-            Tab::Dashboard => "Dashboard",
-            Tab::Sessions => "Sessions",
+            Tab::Dashboard => crate::i18n::t("tab.dashboard"),
+            Tab::Sessions => crate::i18n::t("tab.sessions"),
+            Tab::Settings => crate::i18n::t("tab.settings"),
         }
     }
     pub fn next(self) -> Tab {
         match self {
             Tab::Dashboard => Tab::Sessions,
-            Tab::Sessions => Tab::Dashboard,
+            Tab::Sessions => Tab::Settings,
+            Tab::Settings => Tab::Dashboard,
         }
     }
     pub fn prev(self) -> Tab {
-        self.next() // two tabs — next and prev are the same toggle.
+        match self {
+            Tab::Dashboard => Tab::Settings,
+            Tab::Sessions => Tab::Dashboard,
+            Tab::Settings => Tab::Sessions,
+        }
     }
     pub fn index(self) -> usize {
         match self {
             Tab::Dashboard => 0,
             Tab::Sessions => 1,
+            Tab::Settings => 2,
         }
     }
 }
@@ -235,6 +243,8 @@ pub struct App {
     pub session_sort: SessionSort,
     /// Process-tab row selection. Indexes into `metrics.snapshot()`.
     pub selected_process: usize,
+    /// Settings-tab row selection. Indexes into `SettingsItem::all()`.
+    pub selected_setting: usize,
     /// Per-session token cache (`(path, mtime) → tokens + message_count`).
     /// Fed by `collector::token_refresh` in the background so the Dashboard
     /// aggregates and the Sessions list see accurate numbers without waiting
@@ -262,6 +272,7 @@ impl App {
             session_filter_input: false,
             session_sort: SessionSort::default(),
             selected_process: 0,
+            selected_setting: 0,
             token_cache,
         };
         app.initial_scan().await?;

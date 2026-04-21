@@ -3,9 +3,35 @@
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Sparkline;
+use unicode_width::UnicodeWidthStr;
 
 use crate::adapter::types::SessionStatus;
 use crate::tui::theme;
+
+/// Left-pad `s` with spaces to reach at least `target_cols` terminal columns.
+///
+/// Rust's built-in `format!("{:<N}", s)` pads by char count, which produces
+/// visually ragged columns whenever CJK characters are in play — `语言`
+/// (2 chars, 4 cols) lines up with `English` (7 chars, 7 cols) as if they had
+/// the same width when they don't. This helper uses `unicode-width` for the
+/// correct East-Asian-Width-aware measurement.
+///
+/// If the string is already at or past the target, it's returned unchanged;
+/// truncation is out of scope because deciding where to cut a grapheme
+/// cluster belongs to the caller.
+pub fn pad_display_width(s: &str, target_cols: usize) -> String {
+    let width = UnicodeWidthStr::width(s);
+    if width >= target_cols {
+        s.to_string()
+    } else {
+        let mut out = String::with_capacity(s.len() + (target_cols - width));
+        out.push_str(s);
+        for _ in 0..(target_cols - width) {
+            out.push(' ');
+        }
+        out
+    }
+}
 
 pub fn status_span(status: SessionStatus) -> Span<'static> {
     let (label, style) = match status {
@@ -186,5 +212,24 @@ mod tests {
     fn trend_arrow_zero_head_with_growth_is_rising() {
         let v = vec![0, 0, 0, 0, 50, 100, 150, 200];
         assert_eq!(trend_arrow(&v), "↗");
+    }
+
+    #[test]
+    fn pad_display_width_handles_cjk_and_ascii() {
+        // ASCII: straightforward, padding equals column count.
+        assert_eq!(pad_display_width("Language", 12), "Language    ");
+        // CJK: each char is 2 cols, so "语言" is 4 cols wide.
+        let padded = pad_display_width("语言", 12);
+        assert_eq!(UnicodeWidthStr::width(padded.as_str()), 12);
+        // Mixed: "Token 显示" = 5 + 1 + 4 = 10 cols; pad to 16.
+        let padded = pad_display_width("Token 显示", 16);
+        assert_eq!(UnicodeWidthStr::width(padded.as_str()), 16);
+    }
+
+    #[test]
+    fn pad_display_width_already_wide_enough_returns_unchanged() {
+        // Over-width input: we refuse to truncate, just hand it back.
+        let s = "very long label that exceeds target";
+        assert_eq!(pad_display_width(s, 5), s);
     }
 }

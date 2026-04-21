@@ -39,8 +39,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.debug)?;
 
+    // Persisted preferences win unless the user overrode on the CLI. The
+    // default clap value (`2`) would otherwise always clobber a saved choice.
+    let configured_interval = agentmonitor::settings::get().sample_interval.0;
+    let sample_secs = if cli.sample_interval == 2 && configured_interval != 2 {
+        configured_interval
+    } else {
+        cli.sample_interval
+    };
+
     let config = Config {
-        sample_interval: Duration::from_secs(cli.sample_interval.max(1)),
+        sample_interval: Duration::from_secs(sample_secs.max(1)),
         ..Config::default()
     };
 

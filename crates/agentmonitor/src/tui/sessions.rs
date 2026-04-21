@@ -5,6 +5,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::i18n::t;
+use crate::settings;
 use crate::tui::{detail, theme};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -27,15 +29,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|&i| {
             let s = &state.sessions[i];
+            let time_pattern = settings::get().time_format.pattern_short();
             let when = s
                 .updated_at
-                .map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+                .map(|t| t.with_timezone(&chrono::Local).format(time_pattern).to_string())
                 .unwrap_or_else(|| "-----".into());
             let line = Line::from(vec![
                 Span::styled(
                     format!("{:<10} ", s.agent_label()),
                     Style::default()
-                        .fg(theme::ACCENT)
+                        .fg(theme::accent())
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("{} ", when), theme::muted()),
@@ -58,7 +61,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let mut list_state = ListState::default();
     list_state.select(selected_row);
 
-    let title = format!(" Sessions ({}/{}) ", visible.len(), state.sessions.len());
+    let title = format!("{}({}/{}) ", t("sessions.title"), visible.len(), state.sessions.len());
     let list = List::new(items)
         .block(
             Block::default()
@@ -83,55 +86,55 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         detail::render(frame, body[1], &s, preview_ref);
     } else {
         let msg = if app.session_filter.is_empty() {
-            "No sessions found yet. Run `claude` or `codex` to see them here."
+            t("sessions.empty")
         } else {
-            "No sessions match the current filter."
+            t("sessions.empty_filtered")
         };
         let empty = Paragraph::new(msg).style(theme::muted()).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(Span::styled(" Detail ", theme::title())),
+                .title(Span::styled(t("sessions.detail"), theme::title())),
         );
         frame.render_widget(empty, body[1]);
     }
 }
 
 fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App) {
-    let mut spans = vec![Span::styled("Filter ", theme::muted())];
+    let mut spans = vec![Span::styled(t("sessions.filter_label"), theme::muted())];
     if app.session_filter_input {
         spans.push(Span::styled(
             format!("{}█", app.session_filter),
             Style::default()
                 .fg(Color::Black)
-                .bg(theme::ACCENT)
+                .bg(theme::accent())
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            "  Esc cancel · Enter apply · Backspace delete",
+            t("sessions.filter_edit_hint"),
             theme::muted(),
         ));
     } else if app.session_filter.is_empty() {
         spans.push(Span::styled(
-            "(press / to filter)",
+            t("sessions.filter_hint"),
             theme::muted(),
         ));
     } else {
         spans.push(Span::styled(
             format!("`{}`", app.session_filter),
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(" (c to clear)", theme::muted()));
+        spans.push(Span::styled(t("sessions.filter_clear_hint"), theme::muted()));
     }
-    spans.push(Span::styled("    Sort ", theme::muted()));
+    spans.push(Span::styled(t("sessions.sort_label"), theme::muted()));
     spans.push(Span::styled(
         app.session_sort.label(),
         Style::default()
-            .fg(theme::ACCENT)
+            .fg(theme::accent())
             .add_modifier(Modifier::BOLD),
     ));
-    spans.push(Span::styled(" (s to cycle)", theme::muted()));
+    spans.push(Span::styled(t("sessions.sort_hint"), theme::muted()));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 

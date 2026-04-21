@@ -19,6 +19,8 @@ use ratatui::Frame;
 use crate::adapter::conversation::{Block as CBlock, ConversationEvent};
 use crate::adapter::types::{MessageRole, SessionMeta};
 use crate::app::{App, ConversationCache, ExpandMode, Mode};
+use crate::i18n::t;
+use crate::settings;
 use crate::tui::theme;
 
 /// Cached flattened transcript — kept outside of `AppState` so `draw()` can
@@ -127,6 +129,7 @@ fn render_header(
     meta: Option<&SessionMeta>,
     cache: Option<&ConversationCache>,
 ) {
+    let long_pat = settings::get().time_format.pattern_long();
     let (agent, id, cwd, model, updated) = match meta {
         Some(m) => (
             m.agent_label().to_string(),
@@ -134,31 +137,31 @@ fn render_header(
             m.cwd_display(),
             m.model.clone().unwrap_or_else(|| "-".into()),
             m.updated_at
-                .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+                .map(|t| t.with_timezone(&chrono::Local).format(long_pat).to_string())
                 .unwrap_or_else(|| "-".into()),
         ),
         None => ("-".into(), "-".into(), "-".into(), "-".into(), "-".into()),
     };
     let status_chip = match cache {
-        Some(c) if c.loading => Span::styled(" loading… ", theme::muted()),
+        Some(c) if c.loading => Span::styled(t("viewer.loading_chip"), theme::muted()),
         Some(c) if c.error.is_some() => Span::styled(
             format!(" error: {} ", c.error.as_deref().unwrap_or("?")),
             Style::default().fg(Color::Red),
         ),
         Some(c) => Span::styled(
-            format!(" {} events ", c.events.len()),
+            format!(" {} {} ", c.events.len(), t("viewer.events")),
             Style::default()
-                .fg(theme::ACCENT)
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD),
         ),
-        None => Span::styled(" no data ", theme::muted()),
+        None => Span::styled(t("viewer.no_data"), theme::muted()),
     };
     let lines = vec![
         Line::from(vec![
             Span::styled(
                 " Viewer · ",
                 Style::default()
-                    .fg(theme::ACCENT)
+                    .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(agent),
@@ -168,20 +171,20 @@ fn render_header(
             status_chip,
         ]),
         Line::from(vec![
-            Span::styled("CWD     ", theme::muted()),
+            Span::styled(t("viewer.cwd"), theme::muted()),
             Span::raw(cwd),
         ]),
         Line::from(vec![
-            Span::styled("Model   ", theme::muted()),
+            Span::styled(t("viewer.model"), theme::muted()),
             Span::raw(model),
-            Span::styled("    Updated ", theme::muted()),
+            Span::styled(t("viewer.updated"), theme::muted()),
             Span::raw(updated),
         ]),
     ];
     let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(" Conversation ", theme::title())),
+            .title(Span::styled(t("viewer.title"), theme::title())),
     );
     frame.render_widget(para, area);
 }
@@ -195,7 +198,7 @@ fn render_body(
     let block = Block::default().borders(Borders::ALL);
     let Some(cache) = cache else {
         let para = Paragraph::new(Line::from(Span::styled(
-            "No conversation loaded.",
+            t("viewer.no_conversation"),
             theme::muted(),
         )))
         .block(block);
@@ -213,7 +216,7 @@ fn render_body(
     }
     if cache.loading && cache.events.is_empty() {
         let para = Paragraph::new(Line::from(Span::styled(
-            "Loading conversation…",
+            t("viewer.loading"),
             theme::muted(),
         )))
         .block(block);
@@ -222,7 +225,7 @@ fn render_body(
     }
     if cache.events.is_empty() {
         let para = Paragraph::new(Line::from(Span::styled(
-            "This session has no readable messages.",
+            t("viewer.no_messages"),
             theme::muted(),
         )))
         .block(block);
@@ -240,22 +243,22 @@ fn render_footer(frame: &mut Frame, area: Rect, cache: Option<&ConversationCache
         None => (0, ExpandMode::Collapsed, 0),
     };
     let expand_label = match expand {
-        ExpandMode::Collapsed => "collapsed",
-        ExpandMode::Expanded => "expanded",
+        ExpandMode::Collapsed => t("viewer.collapsed"),
+        ExpandMode::Expanded => t("viewer.expanded"),
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(" Esc ", Style::default()),
-        Span::styled("back ", theme::muted()),
+        Span::styled(format!("{} ", t("footer.back")), theme::muted()),
         Span::styled(" j/k ", Style::default()),
-        Span::styled("scroll ", theme::muted()),
+        Span::styled(format!("{} ", t("footer.scroll")), theme::muted()),
         Span::styled(" Ctrl+D/U ", Style::default()),
-        Span::styled("half-page ", theme::muted()),
+        Span::styled(format!("{} ", t("footer.half_page")), theme::muted()),
         Span::styled(" g/G ", Style::default()),
-        Span::styled("top/bottom ", theme::muted()),
+        Span::styled(format!("{} ", t("footer.top_bottom")), theme::muted()),
         Span::styled(" e/c ", Style::default()),
-        Span::styled("expand/collapse ", theme::muted()),
+        Span::styled(format!("{} ", t("footer.expand_collapse")), theme::muted()),
         Span::styled(
-            format!(" [{expand_label} · {total} events · row {scroll}] "),
+            format!(" [{expand_label} · {total} {} · row {scroll}] ", t("viewer.events")),
             theme::muted(),
         ),
     ]));
@@ -286,7 +289,7 @@ fn event_header(ev: &ConversationEvent) -> Line<'static> {
             .fg(theme::SUCCESS)
             .add_modifier(Modifier::BOLD),
         MessageRole::Assistant => Style::default()
-            .fg(theme::ACCENT)
+            .fg(theme::accent())
             .add_modifier(Modifier::BOLD),
         MessageRole::System => Style::default().fg(theme::WARN),
         MessageRole::Tool => Style::default().fg(Color::Magenta),
@@ -328,7 +331,7 @@ fn append_block(out: &mut Vec<Line<'static>>, block: &CBlock, expand: ExpandMode
             input,
         } => {
             let head = format!("▸ tool_use {}", preview_or_name(name, preview));
-            out.push(indent_line(&head, Style::default().fg(theme::ACCENT)));
+            out.push(indent_line(&head, Style::default().fg(theme::accent())));
             if expand == ExpandMode::Expanded && !input.trim().is_empty() {
                 push_body(out, input, theme::muted());
             }

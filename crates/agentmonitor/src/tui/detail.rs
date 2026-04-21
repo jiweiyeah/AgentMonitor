@@ -6,6 +6,8 @@ use ratatui::Frame;
 
 use crate::adapter::types::{MessagePreview, MessageRole, SessionMeta};
 use crate::app::PreviewCache;
+use crate::i18n::t;
+use crate::settings;
 use crate::tui::theme;
 use crate::tui::widgets::{status_span, token_bar_line};
 
@@ -20,13 +22,14 @@ pub fn render(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&P
 }
 
 fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&PreviewCache>) {
+    let long_pat = settings::get().time_format.pattern_long();
     let started = s
         .started_at
-        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| t.with_timezone(&chrono::Local).format(long_pat).to_string())
         .unwrap_or_else(|| "-".into());
     let updated = s
         .updated_at
-        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| t.with_timezone(&chrono::Local).format(long_pat).to_string())
         .unwrap_or_else(|| "-".into());
 
     // If the full parse has finished, prefer its message_count; otherwise
@@ -44,45 +47,45 @@ fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&
 
     let lines = vec![
         Line::from(vec![
-            Span::styled("Agent    ", theme::muted()),
+            Span::styled(t("detail.agent"), theme::muted()),
             Span::raw(s.agent_label()),
             Span::raw("    "),
             status_span(s.status),
         ]),
         Line::from(vec![
-            Span::styled("Session  ", theme::muted()),
+            Span::styled(t("detail.session"), theme::muted()),
             Span::raw(s.id.clone()),
         ]),
         Line::from(vec![
-            Span::styled("CWD      ", theme::muted()),
+            Span::styled(t("detail.cwd"), theme::muted()),
             Span::raw(s.cwd_display()),
         ]),
         Line::from(vec![
-            Span::styled("Model    ", theme::muted()),
+            Span::styled(t("detail.model"), theme::muted()),
             Span::raw(s.model.clone().unwrap_or_else(|| "-".into())),
-            Span::styled("   Version  ", theme::muted()),
+            Span::styled(t("detail.version"), theme::muted()),
             Span::raw(s.version.clone().unwrap_or_else(|| "-".into())),
         ]),
         Line::from(vec![
-            Span::styled("Branch   ", theme::muted()),
+            Span::styled(t("detail.branch"), theme::muted()),
             Span::raw(s.git_branch.clone().unwrap_or_else(|| "-".into())),
         ]),
         Line::from(vec![
-            Span::styled("Started  ", theme::muted()),
+            Span::styled(t("detail.started"), theme::muted()),
             Span::raw(started),
         ]),
         Line::from(vec![
-            Span::styled("Updated  ", theme::muted()),
+            Span::styled(t("detail.updated"), theme::muted()),
             Span::raw(updated),
         ]),
         Line::from(vec![
-            Span::styled("Messages ", theme::muted()),
+            Span::styled(t("detail.messages"), theme::muted()),
             Span::styled(count_label, count_style),
-            Span::styled("    File size  ", theme::muted()),
+            Span::styled(t("detail.file_size"), theme::muted()),
             Span::raw(format_bytes(s.size_bytes)),
         ]),
         Line::from(""),
-        Line::from(Span::styled("Tokens", theme::title())),
+        Line::from(Span::styled(t("detail.tokens"), theme::title())),
         token_bar_line(
             s.tokens.input,
             s.tokens.cache_read,
@@ -94,7 +97,7 @@ fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&
     let para = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(Span::styled(" Detail ", theme::title())),
+            .title(Span::styled(t("sessions.detail"), theme::title())),
     );
     frame.render_widget(para, area);
 }
@@ -103,21 +106,21 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: Option<&PreviewCache>)
     let (lines, title) = match preview {
         None => (
             vec![Line::from(Span::styled(
-                "Select a session to preview.",
+                t("sessions.preview_select"),
                 theme::muted(),
             ))],
-            " Recent messages ".to_string(),
+            t("sessions.recent_messages").to_string(),
         ),
         Some(p) if p.loading => (
-            vec![Line::from(Span::styled("Loading…", theme::muted()))],
-            " Recent messages (loading) ".to_string(),
+            vec![Line::from(Span::styled(t("sessions.preview_loading"), theme::muted()))],
+            t("sessions.recent_messages_loading").to_string(),
         ),
         Some(p) if p.messages.is_empty() => (
             vec![Line::from(Span::styled(
-                "No user/assistant messages found in the tail of this file.",
+                t("sessions.preview_no_messages"),
                 theme::muted(),
             ))],
-            " Recent messages ".to_string(),
+            t("sessions.recent_messages").to_string(),
         ),
         Some(p) => {
             let mut lines = Vec::new();
@@ -125,7 +128,7 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: Option<&PreviewCache>)
                 lines.extend(message_to_lines(m));
                 lines.push(Line::from(""));
             }
-            (lines, format!(" Recent messages ({}) ", p.messages.len()))
+            (lines, format!("{}({}) ", t("sessions.recent_messages"), p.messages.len()))
         }
     };
     let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
@@ -142,13 +145,14 @@ fn message_to_lines(m: &MessagePreview) -> Vec<Line<'static>> {
             .fg(theme::SUCCESS)
             .add_modifier(Modifier::BOLD),
         MessageRole::Assistant => Style::default()
-            .fg(theme::ACCENT)
+            .fg(theme::accent())
             .add_modifier(Modifier::BOLD),
         MessageRole::System => Style::default().fg(theme::WARN),
         _ => theme::muted(),
     };
+    let short_pat = settings::get().time_format.pattern_short();
     let when =
-        m.ts.map(|t| t.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string())
+        m.ts.map(|t| t.with_timezone(&chrono::Local).format(short_pat).to_string())
             .unwrap_or_else(|| "".into());
     let header = Line::from(vec![
         Span::styled(format!("[{}] ", m.role.label()), role_style),
