@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::tui::theme;
-use crate::tui::widgets::{ascii_spark, human_bytes};
+use crate::tui::widgets::human_bytes;
 
 /// Renders the embedded processes table inside the Dashboard. The former
 /// top-of-tab summary (live count / Σ RSS / trend spark) was dropped: every
@@ -46,7 +46,6 @@ fn render_table(
         Cell::from("RSS"),
         Cell::from("CPU %"),
         Cell::from("Uptime"),
-        Cell::from("RSS trend"),
     ])
     .style(theme::title());
 
@@ -59,7 +58,6 @@ fn render_table(
         .iter()
         .map(|p| {
             let uptime = now_unix.saturating_sub(p.started_unix);
-            let hist = ascii_spark(&p.rss_history(), 14);
             let agent_label = app
                 .adapters
                 .iter()
@@ -74,7 +72,6 @@ fn render_table(
                 Cell::from(human_bytes(p.latest_rss_kb())),
                 Cell::from(format!("{:.1}", p.latest_cpu())),
                 Cell::from(format_uptime(uptime)),
-                Cell::from(hist),
             ])
         })
         .collect();
@@ -86,7 +83,6 @@ fn render_table(
         Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(10),
-        Constraint::Length(16),
     ];
 
     // Clamp to the current process count so shrinking doesn't leave the

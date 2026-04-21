@@ -44,40 +44,14 @@ pub fn token_bar_line(
     Line::from(Span::styled(label, theme::muted()))
 }
 
-/// Inline unicode-block sparkline over the most recent `max_width` values.
-/// Flattens to a low bar when variance is below ~5% of peak so sampling jitter
-/// isn't rendered as a dramatic ridge.
-pub fn ascii_spark(values: &[u64], max_width: usize) -> String {
-    if values.is_empty() || max_width == 0 {
-        return String::new();
-    }
-    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
-    let start = values.len().saturating_sub(max_width);
-    let slice = &values[start..];
-    let max = *slice.iter().max().unwrap_or(&0);
-    let min = *slice.iter().min().unwrap_or(&0);
-    let spread = max.saturating_sub(min);
-    if max == 0 || spread.saturating_mul(20) < max {
-        return BARS[1].to_string().repeat(slice.len());
-    }
-    let range = spread as f64;
-    slice
-        .iter()
-        .map(|v| {
-            let norm = (*v - min) as f64 / range;
-            let idx = (norm * (BARS.len() - 1) as f64).round() as usize;
-            BARS[idx.min(BARS.len() - 1)]
-        })
-        .collect()
-}
-
 /// Inline braille-dot sparkline. Each character packs two samples (left / right
-/// column) × four vertical levels, giving 2×4 the resolution of `ascii_spark`
-/// in the same terminal cell count. Output length is exactly `char_width`
-/// characters when there are ≥ `char_width * 2` samples.
+/// column) × four vertical levels, giving 2×4 the resolution of a classic
+/// single-cell ASCII block sparkline in the same terminal cell count. Output
+/// length is exactly `char_width` characters when there are ≥ `char_width * 2`
+/// samples.
 ///
-/// Uses the same 5 %-of-peak flatness guard as `ascii_spark` so sampling jitter
-/// isn't rendered as a dramatic ridge.
+/// Uses a 5 %-of-peak flatness guard so sampling jitter isn't rendered as a
+/// dramatic ridge.
 pub fn braille_spark(values: &[u64], char_width: usize) -> String {
     if values.is_empty() || char_width == 0 {
         return String::new();
