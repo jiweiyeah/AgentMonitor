@@ -98,8 +98,6 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
             Tab::Dashboard => {
                 spans.push(Span::styled(" f ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.refresh")), theme::muted()));
-                spans.push(Span::styled(" Enter ", Style::default()));
-                spans.push(Span::styled(format!("{} ", t("footer.jump_to_session")), theme::muted()));
             }
             Tab::Settings => {
                 spans.push(Span::styled(" ←/→ ", Style::default()));

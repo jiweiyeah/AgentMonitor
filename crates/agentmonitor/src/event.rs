@@ -271,11 +271,6 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
                 ensure_conversation(app, &p, false);
             }
         }
-        (KeyCode::Enter, _) if app.tab == Tab::Dashboard => {
-            // Dashboard now embeds the processes table, so Enter jumps to
-            // the session whose cwd matches the highlighted process row.
-            jump_to_process_session(app);
-        }
         (KeyCode::Char('/'), _) if app.tab == Tab::Sessions => {
             app.session_filter_input = true;
             app.state.write().dirty = true;
@@ -302,14 +297,13 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
             // token_refresh already wrote into state for each path.
             rescan_sessions(app);
         }
-        (KeyCode::Char('r'), _) if app.tab == Tab::Settings => {
-            // Settings tab keeps 'r' as reset-to-defaults.
-            crate::tui::settings::reset_to_defaults();
-            app.state.write().dirty = true;
-        }
-        (KeyCode::Char('r'), _) => {
+        (KeyCode::Char('r'), _) if app.tab == Tab::Sessions => {
             // Resume selected session in a new Terminal window.
             resume_session(app);
+        }
+        (KeyCode::Char('r'), _) if app.tab == Tab::Settings => {
+            crate::tui::settings::reset_to_defaults();
+            app.state.write().dirty = true;
         }
         _ => {}
     }
@@ -406,58 +400,6 @@ fn clamp_step(cur: usize, delta: i32, len: usize) -> usize {
     } else {
         cur.saturating_sub((-delta) as usize)
     }
-}
-
-/// On Enter from the Dashboard tab, find a session whose `cwd` matches the
-/// currently highlighted process row and jump to it in the Sessions tab.
-/// Best-effort: if no match, stay put. This is the cross-tab correlation
-/// that makes PIDs actionable from the dashboard's embedded processes table.
-fn jump_to_process_session(app: &mut App) {
-    let procs = app.metrics.snapshot();
-    let Some(proc) = procs.get(app.selected_process) else {
-        return;
-    };
-    let Some(target_cwd) = proc.cwd.clone() else {
-        return;
-    };
-    let agent = proc.agent;
-    let target = {
-        let s = app.state.read();
-        // Among sessions with matching cwd+agent, prefer the most recently
-        // updated one — that's the active conversation the user just saw.
-        s.sessions
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| {
-                m.agent == agent
-                    && m.cwd
-                        .as_ref()
-                        .map(|p| p.to_string_lossy() == target_cwd)
-                        .unwrap_or(false)
-            })
-            .max_by_key(|(_, m)| m.updated_at)
-            .map(|(i, _)| i)
-    };
-    let Some(raw_idx) = target else { return };
-
-    app.tab = Tab::Sessions;
-    // Resolve raw_idx → visible row so selected_session indexes into what the
-    // user actually sees.
-    let mut s = app.state.write();
-    let visible = s.visible_session_indices(&app.session_filter, app.session_sort);
-    if let Some(row) = visible.iter().position(|&i| i == raw_idx) {
-        s.selected_session = row;
-    } else {
-        // Filter hides it: clear filter so the jump is visible.
-        drop(s);
-        app.session_filter.clear();
-        let mut s = app.state.write();
-        let visible = s.visible_session_indices(&app.session_filter, app.session_sort);
-        if let Some(row) = visible.iter().position(|&i| i == raw_idx) {
-            s.selected_session = row;
-        }
-    }
-    app.state.write().dirty = true;
 }
 
 fn handle_viewer(code: KeyCode, _modifiers: KeyModifiers, app: &mut App, _path: &Path) -> bool {
