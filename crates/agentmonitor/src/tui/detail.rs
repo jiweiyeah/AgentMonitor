@@ -92,6 +92,10 @@ fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&
             s.tokens.cache_creation,
             s.tokens.output,
         ),
+        Line::from(Span::styled(
+            t("detail.resume_hint"),
+            Style::default().fg(theme::accent()),
+        )),
     ];
 
     let para = Paragraph::new(lines).block(

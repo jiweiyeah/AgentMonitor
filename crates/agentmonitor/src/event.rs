@@ -292,29 +292,24 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
             s.selected_session = 0;
             s.dirty = true;
         }
+        (KeyCode::Char('f'), _) if app.tab == Tab::Settings => {
+            // Settings tab: 'f' is refresh (rescan), not the 'r' reset shortcut.
+            rescan_sessions(app);
+        }
+        (KeyCode::Char('f'), _) => {
+            // Manual refresh — one-shot scan. Must not clobber tokens: the
+            // fast-parse path can't reproduce them, so preserve whatever
+            // token_refresh already wrote into state for each path.
+            rescan_sessions(app);
+        }
         (KeyCode::Char('r'), _) if app.tab == Tab::Settings => {
-            // Settings tab reuses `r` as reset-to-defaults rather than the
-            // global rescan shortcut — rescanning from here doesn't help the
-            // user tweak preferences.
+            // Settings tab keeps 'r' as reset-to-defaults.
             crate::tui::settings::reset_to_defaults();
             app.state.write().dirty = true;
         }
         (KeyCode::Char('r'), _) => {
-            // Manual refresh — one-shot scan. Must not clobber tokens: the
-            // fast-parse path can't reproduce them, so preserve whatever
-            // token_refresh already wrote into state for each path.
-            let state = app.state.clone();
-            let adapters = app.adapters.clone();
-            tokio::spawn(async move {
-                let mut fresh = Vec::new();
-                for adapter in &adapters {
-                    if let Ok(mut batch) = adapter.scan_all().await {
-                        fresh.append(&mut batch);
-                    }
-                }
-                fresh.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-                fs_watch::replace_preserving_tokens(&state, fresh);
-            });
+            // Resume selected session in a new Terminal window.
+            resume_session(app);
         }
         _ => {}
     }
@@ -482,6 +477,11 @@ fn handle_viewer(code: KeyCode, _modifiers: KeyModifiers, app: &mut App, _path: 
         (KeyCode::Char('G'), _) => set_scroll(app, u16::MAX),
         (KeyCode::Char('e'), _) => set_expand(app, ExpandMode::Expanded),
         (KeyCode::Char('c'), _) => set_expand(app, ExpandMode::Collapsed),
+        (KeyCode::Char('r'), _) => {
+            // Resume works from viewer too — the viewed session is the one
+            // being resumed (not the list-selected one).
+            resume_session_from_viewer(app, _path);
+        }
         _ => {}
     }
     false
@@ -549,4 +549,101 @@ fn apply_delta(scroll: u16, delta: i32) -> u16 {
     } else {
         scroll.saturating_add(delta as u16)
     }
+}
+
+/// One-shot rescan across all adapters. Must not clobber tokens: the
+/// fast-parse path can't reproduce them, so preserve whatever token_refresh
+/// already wrote into state for each path.
+fn rescan_sessions(app: &App) {
+    let state = app.state.clone();
+    let adapters = app.adapters.clone();
+    tokio::spawn(async move {
+        let mut fresh = Vec::new();
+        for adapter in &adapters {
+            if let Ok(mut batch) = adapter.scan_all().await {
+                fresh.append(&mut batch);
+            }
+        }
+        fresh.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        fs_watch::replace_preserving_tokens(&state, fresh);
+    });
+}
+
+/// Resume the currently list-selected session (Normal mode).
+fn resume_session(app: &App) {
+    let s = app.state.read();
+    let visible = s.visible_session_indices(&app.session_filter, app.session_sort);
+    let row = visible.get(s.selected_session);
+    let meta = row.and_then(|&i| s.sessions.get(i)).cloned();
+    drop(s);
+
+    let Some(meta) = meta else {
+        return;
+    };
+
+    let cmd = match meta.agent {
+        "claude" => format!("claude --resume {}", meta.id),
+        "codex" => format!("codex resume {}", meta.id),
+        _ => return,
+    };
+
+    if let Err(err) = open_terminal_with_command(meta.cwd.as_deref(), &cmd) {
+        tracing::warn!(?err, "failed to open terminal for resume");
+    }
+}
+
+/// Resume the session currently being viewed (Viewer mode). Falls back to
+/// list-selected if the viewer path doesn't match any known session.
+fn resume_session_from_viewer(app: &App, viewer_path: &Path) {
+    let s = app.state.read();
+    let meta = s
+        .sessions
+        .iter()
+        .find(|m| m.path == viewer_path)
+        .cloned()
+        .or_else(|| {
+            // Fallback: use list-selected session.
+            let visible = s.visible_session_indices(&app.session_filter, app.session_sort);
+            let row = visible.get(s.selected_session)?;
+            s.sessions.get(*row).cloned()
+        });
+    drop(s);
+
+    let Some(meta) = meta else {
+        return;
+    };
+
+    let cmd = match meta.agent {
+        "claude" => format!("claude --resume {}", meta.id),
+        "codex" => format!("codex resume {}", meta.id),
+        _ => return,
+    };
+
+    if let Err(err) = open_terminal_with_command(meta.cwd.as_deref(), &cmd) {
+        tracing::warn!(?err, "failed to open terminal for resume");
+    }
+}
+
+/// Open a new macOS Terminal.app window, `cd` to `cwd` (if given), then run
+/// `cmd`. Uses `osascript` so the TUI stays alive in the original terminal.
+#[cfg(target_os = "macos")]
+fn open_terminal_with_command(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    let full_cmd = match cwd {
+        Some(dir) => format!("cd '{}' && {}", dir.display(), cmd),
+        None => cmd.to_string(),
+    };
+    // Escape double quotes for AppleScript string literal.
+    let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(format!(
+            "tell application \"Terminal\" to do script \"{escaped}\""
+        ))
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_terminal_with_command(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
+    anyhow::bail!("session resume is only supported on macOS")
 }

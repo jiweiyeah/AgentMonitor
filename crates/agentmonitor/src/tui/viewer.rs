@@ -257,6 +257,8 @@ fn render_footer(frame: &mut Frame, area: Rect, cache: Option<&ConversationCache
         Span::styled(format!("{} ", t("footer.top_bottom")), theme::muted()),
         Span::styled(" e/c ", Style::default()),
         Span::styled(format!("{} ", t("footer.expand_collapse")), theme::muted()),
+        Span::styled(" r ", Style::default()),
+        Span::styled(format!("{} ", t("footer.resume")), theme::muted()),
         Span::styled(
             format!(" [{expand_label} · {total} {} · row {scroll}] ", t("viewer.events")),
             theme::muted(),

@@ -38,6 +38,7 @@ fn t_en(key: &str) -> &'static str {
         "footer.sort" => "sort",
         "footer.clear" => "clear",
         "footer.open_viewer" => "open viewer",
+        "footer.resume" => "resume",
         "footer.jump_to_session" => "jump to session",
         "footer.cancel" => "cancel",
         "footer.apply" => "apply",
@@ -93,6 +94,7 @@ fn t_en(key: &str) -> &'static str {
         "detail.messages" => "Messages ",
         "detail.file_size" => "    File size  ",
         "detail.tokens" => "Tokens",
+        "detail.resume_hint" => "r: resume in Terminal",
 
         // ── Viewer ──────────────────────────────────────
         "viewer.title" => " Conversation ",
@@ -148,6 +150,7 @@ fn t_zh(key: &str) -> Option<&'static str> {
         "footer.sort" => "排序",
         "footer.clear" => "清空",
         "footer.open_viewer" => "打开查看器",
+        "footer.resume" => "恢复",
         "footer.jump_to_session" => "跳转会话",
         "footer.cancel" => "取消",
         "footer.apply" => "应用",
@@ -200,6 +203,7 @@ fn t_zh(key: &str) -> Option<&'static str> {
         "detail.messages" => "消息数   ",
         "detail.file_size" => "    文件大小   ",
         "detail.tokens" => "Tokens",
+        "detail.resume_hint" => "r: 在终端恢复会话",
 
         "viewer.title" => " 对话查看器 ",
         "viewer.loading" => "加载对话中…",

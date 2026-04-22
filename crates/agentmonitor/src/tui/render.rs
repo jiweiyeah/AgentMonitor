@@ -82,7 +82,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled(format!("{} ", t("footer.move")), theme::muted()));
         match app.tab {
             Tab::Sessions => {
-                spans.push(Span::styled(" r ", Style::default()));
+                spans.push(Span::styled(" f ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.refresh")), theme::muted()));
                 spans.push(Span::styled(" / ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.filter")), theme::muted()));
@@ -92,9 +92,11 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(format!("{} ", t("footer.clear")), theme::muted()));
                 spans.push(Span::styled(" Enter ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.open_viewer")), theme::muted()));
+                spans.push(Span::styled(" r ", Style::default()));
+                spans.push(Span::styled(format!("{} ", t("footer.resume")), theme::muted()));
             }
             Tab::Dashboard => {
-                spans.push(Span::styled(" r ", Style::default()));
+                spans.push(Span::styled(" f ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.refresh")), theme::muted()));
                 spans.push(Span::styled(" Enter ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.jump_to_session")), theme::muted()));
@@ -104,6 +106,8 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(format!("{} ", t("footer.change")), theme::muted()));
                 spans.push(Span::styled(" r ", Style::default()));
                 spans.push(Span::styled("reset ", theme::muted()));
+                spans.push(Span::styled(" f ", Style::default()));
+                spans.push(Span::styled(format!("{} ", t("footer.refresh")), theme::muted()));
             }
         }
     }
