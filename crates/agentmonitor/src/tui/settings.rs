@@ -17,7 +17,7 @@ use ratatui::Frame;
 use crate::app::App;
 use crate::i18n::t;
 use crate::settings::{
-    self, Language, SampleIntervalSecs, Settings, ThemeColor, TimeFormat, TokenUnit,
+    self, Language, SampleIntervalSecs, Settings, TerminalApp, ThemeColor, TimeFormat, TokenUnit,
 };
 use crate::tui::theme;
 use crate::tui::widgets::pad_display_width;
@@ -34,6 +34,7 @@ pub enum SettingsItem {
     TokenUnit,
     SampleInterval,
     IncludeCacheInTotal,
+    Terminal,
 }
 
 impl SettingsItem {
@@ -45,6 +46,7 @@ impl SettingsItem {
             SettingsItem::TokenUnit,
             SettingsItem::SampleInterval,
             SettingsItem::IncludeCacheInTotal,
+            SettingsItem::Terminal,
         ]
     }
 
@@ -56,6 +58,7 @@ impl SettingsItem {
             SettingsItem::TokenUnit => "settings.token_unit",
             SettingsItem::SampleInterval => "settings.sample_interval",
             SettingsItem::IncludeCacheInTotal => "settings.include_cache",
+            SettingsItem::Terminal => "settings.terminal",
         }
     }
 
@@ -74,6 +77,7 @@ impl SettingsItem {
                 t("settings.off")
             }
             .to_string(),
+            SettingsItem::Terminal => s.terminal.label().to_string(),
         }
     }
 
@@ -87,6 +91,7 @@ impl SettingsItem {
             SettingsItem::IncludeCacheInTotal => {
                 s.include_cache_in_total = !s.include_cache_in_total
             }
+            SettingsItem::Terminal => s.terminal = s.terminal.cycle(),
         });
     }
 
@@ -100,6 +105,7 @@ impl SettingsItem {
             SettingsItem::IncludeCacheInTotal => {
                 s.include_cache_in_total = !s.include_cache_in_total
             }
+            SettingsItem::Terminal => s.terminal = s.terminal.cycle_back(),
         });
     }
 }
@@ -114,6 +120,7 @@ pub fn reset_to_defaults() {
             token_unit: TokenUnit::default(),
             sample_interval: SampleIntervalSecs::default(),
             include_cache_in_total: true,
+            terminal: TerminalApp::default(),
         };
     });
 }

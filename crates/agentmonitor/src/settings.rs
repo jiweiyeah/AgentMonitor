@@ -8,7 +8,7 @@
 //! Load failures fall back silently to defaults — a malformed settings file
 //! should never prevent the TUI from starting.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use parking_lot::RwLock;
@@ -183,6 +183,135 @@ impl TokenUnit {
     }
 }
 
+/// Terminal application used to resume sessions. Only terminals that are
+/// detected on the current system appear in the Settings UI cycle list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalApp {
+    Terminal,
+    Ghostty,
+    ITerm2,
+    Alacritty,
+    Kitty,
+    WezTerm,
+    Warp,
+}
+
+impl Default for TerminalApp {
+    fn default() -> Self {
+        // Pick the first available terminal, falling back to Terminal on macOS
+        // or the first CLI-based option on Linux.
+        Self::detect().first().copied().unwrap_or(if cfg!(target_os = "macos") {
+            TerminalApp::Terminal
+        } else {
+            TerminalApp::Alacritty
+        })
+    }
+}
+
+impl TerminalApp {
+    pub fn all() -> &'static [TerminalApp] {
+        &[
+            TerminalApp::Terminal,
+            TerminalApp::Ghostty,
+            TerminalApp::ITerm2,
+            TerminalApp::Alacritty,
+            TerminalApp::Kitty,
+            TerminalApp::WezTerm,
+            TerminalApp::Warp,
+        ]
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TerminalApp::Terminal => "Terminal",
+            TerminalApp::Ghostty => "Ghostty",
+            TerminalApp::ITerm2 => "iTerm2",
+            TerminalApp::Alacritty => "Alacritty",
+            TerminalApp::Kitty => "Kitty",
+            TerminalApp::WezTerm => "WezTerm",
+            TerminalApp::Warp => "Warp",
+        }
+    }
+
+    /// Detect which terminals are available on the current system.
+    /// Result is cached for the process lifetime — the set of installed
+    /// terminals does not change during a TUI session.
+    pub fn detect() -> Vec<TerminalApp> {
+        static CACHE: std::sync::OnceLock<Vec<TerminalApp>> = std::sync::OnceLock::new();
+        CACHE.get_or_init(|| {
+            Self::all()
+                .iter()
+                .filter(|t| t.is_available())
+                .copied()
+                .collect()
+        }).clone()
+    }
+
+    /// Check whether this terminal is installed / accessible.
+    fn is_available(&self) -> bool {
+        match self {
+            TerminalApp::Terminal => cfg!(target_os = "macos"),
+            TerminalApp::Ghostty => which_exists("ghostty"),
+            TerminalApp::ITerm2 => {
+                Path::new("/Applications/iTerm.app").exists()
+                    || home_applications().join("iTerm.app").exists()
+            }
+            TerminalApp::Alacritty => which_exists("alacritty"),
+            TerminalApp::Kitty => which_exists("kitty"),
+            TerminalApp::WezTerm => which_exists("wezterm"),
+            TerminalApp::Warp => {
+                Path::new("/Applications/Warp.app").exists()
+                    || home_applications().join("Warp.app").exists()
+            }
+        }
+    }
+
+    /// Cycle forward through detected terminals only.
+    pub fn cycle(self) -> Self {
+        let available = Self::detect();
+        if available.len() <= 1 {
+            return self;
+        }
+        let idx = available
+            .iter()
+            .position(|&t| t == self)
+            .unwrap_or(0);
+        available[(idx + 1) % available.len()]
+    }
+
+    /// Cycle backward through detected terminals only.
+    pub fn cycle_back(self) -> Self {
+        let available = Self::detect();
+        if available.len() <= 1 {
+            return self;
+        }
+        let idx = available
+            .iter()
+            .position(|&t| t == self)
+            .unwrap_or(0);
+        available[(idx + available.len() - 1) % available.len()]
+    }
+}
+
+/// Resolve `~/Applications/` for macOS .app detection.
+fn home_applications() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+        .join("Applications")
+}
+
+/// Check whether an executable exists on `$PATH` via in-process lookup.
+/// Avoids spawning a subprocess and works on systems without the `which`
+/// binary.
+pub(crate) fn which_exists(name: &str) -> bool {
+    std::env::var("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths)
+                .any(|dir| dir.join(name).exists())
+        })
+        .unwrap_or(false)
+}
+
 /// Discrete choices for the process-sampler cadence. Offered as a fixed menu
 /// rather than a free-form integer so Settings tab navigation stays keyboard-
 /// driven — there's no numeric input widget.
@@ -235,6 +364,9 @@ pub struct Settings {
     /// When false, cache buckets are excluded so the headline matches what
     /// users intuitively think of as "real" token spend.
     pub include_cache_in_total: bool,
+    /// Terminal emulator used to resume sessions. Only terminals detected on
+    /// the system are offered in the Settings UI.
+    pub terminal: TerminalApp,
 }
 
 impl Default for Settings {
@@ -246,6 +378,7 @@ impl Default for Settings {
             token_unit: TokenUnit::default(),
             sample_interval: SampleIntervalSecs::default(),
             include_cache_in_total: true,
+            terminal: TerminalApp::default(),
         }
     }
 }

@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 use crate::adapter::{adapter_for_path, DynAdapter};
 use crate::app::{App, ConversationCache, ExpandMode, Mode, PreviewCache, Tab};
 use crate::collector::{fs_watch, proc_sampler, token_refresh};
+use crate::settings::TerminalApp;
 use crate::tui::render;
 use crate::tui::settings::SettingsItem;
 
@@ -529,7 +530,8 @@ fn resume_session(app: &App) {
         _ => return,
     };
 
-    if let Err(err) = open_terminal_with_command(meta.cwd.as_deref(), &cmd) {
+    let terminal = crate::settings::get().terminal;
+    if let Err(err) = open_terminal_with_command(terminal, meta.cwd.as_deref(), &cmd) {
         tracing::warn!(?err, "failed to open terminal for resume");
     }
 }
@@ -561,20 +563,43 @@ fn resume_session_from_viewer(app: &App, viewer_path: &Path) {
         _ => return,
     };
 
-    if let Err(err) = open_terminal_with_command(meta.cwd.as_deref(), &cmd) {
+    let terminal = crate::settings::get().terminal;
+    if let Err(err) = open_terminal_with_command(terminal, meta.cwd.as_deref(), &cmd) {
         tracing::warn!(?err, "failed to open terminal for resume");
     }
 }
 
-/// Open a new macOS Terminal.app window, `cd` to `cwd` (if given), then run
-/// `cmd`. Uses `osascript` so the TUI stays alive in the original terminal.
-#[cfg(target_os = "macos")]
-fn open_terminal_with_command(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
-    let full_cmd = match cwd {
-        Some(dir) => format!("cd '{}' && {}", dir.display(), cmd),
+/// Build a shell command string that changes to `cwd` (if given) then runs
+/// `cmd`. Uses single-quote escaping to prevent shell injection.
+fn build_cd_command(cwd: Option<&Path>, cmd: &str) -> String {
+    match cwd {
+        Some(dir) => {
+            let escaped = dir.display().to_string().replace('\'', "'\\''");
+            format!("cd '{}' && {}", escaped, cmd)
+        }
         None => cmd.to_string(),
-    };
-    // Escape double quotes for AppleScript string literal.
+    }
+}
+
+/// Open a new terminal window, `cd` to `cwd` (if given), then run `cmd`.
+/// Uses the user's configured terminal from Settings; falls back to
+/// macOS Terminal.app or a generic CLI launch on Linux.
+fn open_terminal_with_command(
+    terminal: TerminalApp,
+    cwd: Option<&Path>,
+    cmd: &str,
+) -> anyhow::Result<()> {
+    match terminal {
+        TerminalApp::Terminal => open_terminal_applescript(cwd, cmd),
+        TerminalApp::ITerm2 => open_iterm_applescript(cwd, cmd),
+        TerminalApp::Warp => open_warp(cwd, cmd),
+        _ => open_cli_terminal(terminal, cwd, cmd),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_terminal_applescript(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    let full_cmd = build_cd_command(cwd, cmd);
     let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
     std::process::Command::new("osascript")
         .arg("-e")
@@ -586,6 +611,98 @@ fn open_terminal_with_command(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<(
 }
 
 #[cfg(not(target_os = "macos"))]
-fn open_terminal_with_command(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
-    anyhow::bail!("session resume is only supported on macOS")
+fn open_terminal_applescript(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Terminal.app is only available on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn open_iterm_applescript(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    let full_cmd = build_cd_command(cwd, cmd);
+    let escaped = full_cmd.replace('\\', "\\\\").replace('"', "\\\"");
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(format!(
+            "tell application \"iTerm\"\n\
+             activate\n\
+             create window with default profile\n\
+             tell current session of current window\n\
+             write text \"{escaped}\"\n\
+             end tell\n\
+             end tell"
+        ))
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_iterm_applescript(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
+    anyhow::bail!("iTerm2 is only available on macOS")
+}
+
+#[cfg(target_os = "macos")]
+fn open_warp(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    // Prefer CLI launch if the warp binary is on PATH — avoids System Events
+    // keystroke injection entirely (which needs accessibility permissions and
+    // breaks on special characters).
+    if crate::settings::which_exists("warp") {
+        return open_cli_terminal(TerminalApp::Warp, cwd, cmd);
+    }
+    // Fallback: open the app and paste the command via clipboard.
+    let full_cmd = build_cd_command(cwd, cmd);
+    // Copy command to clipboard.
+    let mut pbcopy = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = pbcopy.stdin.take() {
+        use std::io::Write;
+        let _ = stdin.write_all(full_cmd.as_bytes());
+    }
+    pbcopy.wait()?;
+    // Activate Warp.
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"Warp\" to activate")
+        .spawn()?;
+    // Small delay for Warp to come to foreground.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Paste via Cmd+V.
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to keystroke \"v\" using command down")
+        .spawn()?;
+    // Press Enter.
+    std::process::Command::new("osascript")
+        .arg("-e")
+        .arg("tell application \"System Events\" to key code 36")
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_warp(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Warp is only available on macOS")
+}
+
+/// Resolve the user's login shell, falling back to `/bin/sh`.
+fn user_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+/// Launch a CLI-based terminal (Ghostty, Alacritty, Kitty, WezTerm, Warp)
+/// that accepts `-e` or equivalent to run a command.
+fn open_cli_terminal(terminal: TerminalApp, cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    let full_cmd = build_cd_command(cwd, cmd);
+    let shell = user_shell();
+    let (program, args) = match terminal {
+        TerminalApp::Ghostty => ("ghostty", vec!["-e", &shell, "-c", &full_cmd] as Vec<_>),
+        TerminalApp::Alacritty => ("alacritty", vec!["-e", &shell, "-c", &full_cmd]),
+        TerminalApp::Kitty => ("kitty", vec![&shell, "-c", &full_cmd]),
+        TerminalApp::WezTerm => ("wezterm", vec!["start", "--", &shell, "-c", &full_cmd]),
+        TerminalApp::Warp => ("warp", vec![&shell, "-c", &full_cmd]),
+        _ => anyhow::bail!("unsupported terminal: {:?}", terminal),
+    };
+    std::process::Command::new(program)
+        .args(&args)
+        .spawn()?;
+    Ok(())
 }
