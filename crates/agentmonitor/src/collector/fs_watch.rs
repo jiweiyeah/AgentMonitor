@@ -112,12 +112,7 @@ async fn handle_event(ev: Event, adapters: &[DynAdapter], state: &Arc<RwLock<App
             for path in ev.paths {
                 let path = normalize_fs_path(path);
                 let mut s = state.write();
-                if let Some(idx) = s.sessions.iter().position(|m| m.path == path) {
-                    s.sessions.remove(idx);
-                    if s.selected_session >= s.sessions.len() && !s.sessions.is_empty() {
-                        s.selected_session = s.sessions.len() - 1;
-                    }
-                    s.dirty = true;
+                if s.remove_session_path(&path) {
                     any = true;
                 }
             }

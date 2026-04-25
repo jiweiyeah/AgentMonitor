@@ -44,6 +44,8 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 
 ## 快捷键
 
+下表是默认快捷键；除 `Ctrl+C` 紧急退出外，都可以在 Settings → Keybindings 中查看和编辑。
+
 ### Tab 间导航（Normal 模式）
 
 | 按键 | 动作 |
@@ -66,6 +68,7 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 | `s` | 循环切换排序（updated↓ → tokens↓ → size↓ → msgs↓ → status↓） |
 | `c` | 清除当前过滤 |
 | `r` | 在新终端中恢复当前选中的 session |
+| `d` / `Delete` | 删除当前选中的 session（弹出确认，`Enter` / `y` 确认，`Esc` / `q` 取消） |
 
 过滤输入模式内:`Enter` 应用并退出输入,`Esc` 取消并清空,`Backspace` 删最后一个字符,其他字符追加。
 
@@ -88,6 +91,7 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 | `g` / `G` | 跳到顶 / 底 |
 | `e` / `c` | 全部展开 / 全部折叠（thinking、tool_use、tool_result、attachment 默认折叠） |
 | `r` | 在新终端中恢复当前查看的 session |
+| `d` / `Delete` | 删除当前查看的 session（弹出确认，`Enter` / `y` 确认，`Esc` / `q` 取消） |
 | `Ctrl+C` | 退出程序 |
 
 查看器按 mtime 缓存已解析的会话,并只把 visible 行交给 ratatui 渲染,1MB+ 会话也能常量时间滚动。

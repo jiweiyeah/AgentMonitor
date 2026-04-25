@@ -93,7 +93,7 @@ fn render_meta(frame: &mut Frame, area: Rect, s: &SessionMeta, preview: Option<&
             s.tokens.output,
         ),
         Line::from(Span::styled(
-            t("detail.resume_hint"),
+            t("detail.actions_hint"),
             Style::default().fg(theme::accent()),
         )),
     ];

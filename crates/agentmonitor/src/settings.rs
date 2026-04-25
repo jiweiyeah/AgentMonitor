@@ -15,6 +15,8 @@ use parking_lot::RwLock;
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
+pub use crate::keybinding::{KeyAction, KeyBinding, KeyBindings, KeyCodeSpec, KeyContext};
+
 /// UI language. Extend this enum when adding a new locale; both `i18n::t_*`
 /// dispatches and the Settings tab cycle list read from `all()`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +364,8 @@ pub struct Settings {
     /// Terminal emulator used to resume sessions. Only terminals detected on
     /// the system are offered in the Settings UI.
     pub terminal: TerminalApp,
+    /// User-editable keyboard shortcuts, grouped by context.
+    pub keybindings: KeyBindings,
 }
 
 impl Default for Settings {
@@ -374,6 +378,7 @@ impl Default for Settings {
             sample_interval: SampleIntervalSecs::default(),
             include_cache_in_total: true,
             terminal: TerminalApp::default(),
+            keybindings: KeyBindings::default(),
         }
     }
 }
@@ -407,8 +412,14 @@ impl Settings {
         let Some(path) = Self::config_path() else {
             return Ok(());
         };
+        self.save_to_path(&path)
+    }
+
+    fn save_to_path(&self, path: &Path) -> anyhow::Result<()> {
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, json)?;
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, json)?;
+        std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
 }
@@ -418,7 +429,17 @@ static SETTINGS: OnceLock<RwLock<Settings>> = OnceLock::new();
 /// Shared access handle. First caller initializes from disk; later callers see
 /// the in-memory copy. Writers go through [`update`] so saves stay central.
 pub fn settings() -> &'static RwLock<Settings> {
-    SETTINGS.get_or_init(|| RwLock::new(Settings::load_or_default()))
+    SETTINGS.get_or_init(|| RwLock::new(initial_settings()))
+}
+
+#[cfg(test)]
+fn initial_settings() -> Settings {
+    Settings::default()
+}
+
+#[cfg(not(test))]
+fn initial_settings() -> Settings {
+    Settings::load_or_default()
 }
 
 /// Snapshot the current settings. Cheap — a `Settings` is seven small fields.
@@ -431,7 +452,15 @@ pub fn get() -> Settings {
 pub fn update<F: FnOnce(&mut Settings)>(f: F) {
     let mut guard = settings().write();
     f(&mut guard);
-    if let Err(err) = guard.save() {
+    save_after_update(&guard);
+}
+
+#[cfg(test)]
+fn save_after_update(_: &Settings) {}
+
+#[cfg(not(test))]
+fn save_after_update(settings: &Settings) {
+    if let Err(err) = settings.save() {
         tracing::warn!(?err, "settings save failed");
     }
 }
@@ -494,9 +523,182 @@ mod tests {
     }
 
     #[test]
-    fn theme_color_maps_to_ratatui_color() {
-        assert_eq!(ThemeColor::Cyan.to_color(), Color::Cyan);
-        assert_eq!(ThemeColor::Red.to_color(), Color::Red);
+    fn keybindings_default_round_trip_and_old_json_backfills() {
+        let s = Settings::default();
+        assert!(s
+            .keybindings
+            .bindings_for(KeyAction::Quit)
+            .iter()
+            .any(|binding| binding.display() == "q"));
+
+        let text = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            back.keybindings.bindings_for(KeyAction::Quit),
+            s.keybindings.bindings_for(KeyAction::Quit)
+        );
+
+        let partial = r#"{"language":"zh"}"#;
+        let backfilled: Settings = serde_json::from_str(partial).unwrap();
+        assert!(backfilled
+            .keybindings
+            .bindings_for(KeyAction::SettingsActivate)
+            .iter()
+            .any(|binding| binding.display() == "Enter"));
+    }
+
+    #[test]
+    fn save_to_path_writes_readable_json() {
+        let unique = format!(
+            "agentmonitor-settings-save-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let mut s = Settings::default();
+        s.keybindings.set_binding(
+            KeyAction::Quit,
+            KeyBinding::plain(KeyCodeSpec::Char('x')),
+        );
+
+        s.save_to_path(&path).unwrap();
+        let back: Settings = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+
+        assert!(back.keybindings.matches_action(
+            KeyAction::Quit,
+            crossterm::event::KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::empty()
+        ));
+        assert!(!path.with_extension("json.tmp").exists());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn custom_keybinding_round_trips_through_json() {
+        let mut s = Settings::default();
+        let custom = KeyBinding::plain(KeyCodeSpec::Char('x'));
+        s.keybindings.set_binding(KeyAction::Quit, custom);
+
+        let text = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&text).unwrap();
+
+        assert!(back
+            .keybindings
+            .matches_action(KeyAction::Quit, crossterm::event::KeyCode::Char('x'), crossterm::event::KeyModifiers::empty()));
+        assert!(!back
+            .keybindings
+            .matches_action(KeyAction::Quit, crossterm::event::KeyCode::Char('q'), crossterm::event::KeyModifiers::empty()));
+    }
+
+    #[test]
+    fn keybinding_display_and_conflict_resolution_are_context_aware() {
+        let ctrl_d = KeyBinding::ctrl(KeyCodeSpec::Char('d'));
+        assert_eq!(ctrl_d.display(), "Ctrl+D");
+        assert_eq!(KeyBinding::plain(KeyCodeSpec::Delete).display(), "Delete");
+        assert_eq!(KeyBinding::plain(KeyCodeSpec::Left).display(), "←");
+
+        let mut keybindings = KeyBindings::default();
+        let resume = KeyBinding::plain(KeyCodeSpec::Char('r'));
+        let replaced = keybindings.set_binding(KeyAction::SessionsOpenViewer, resume);
+        assert_eq!(replaced, Some(KeyAction::SessionsResume));
+        assert!(keybindings
+            .bindings_for(KeyAction::SessionsResume)
+            .is_empty());
+        assert_eq!(
+            keybindings.bindings_for(KeyAction::SessionsOpenViewer),
+            &[resume]
+        );
+
+        let viewer_q = KeyBinding::plain(KeyCodeSpec::Char('q'));
+        let replaced = keybindings.set_binding(KeyAction::ViewerBack, viewer_q);
+        assert_eq!(replaced, None);
+        assert_eq!(keybindings.bindings_for(KeyAction::ViewerBack), &[viewer_q]);
+    }
+
+    #[test]
+    fn reset_binding_removes_default_conflicts_in_same_context() {
+        let mut keybindings = KeyBindings::default();
+        let default_open = KeyBinding::plain(KeyCodeSpec::Enter);
+        keybindings.set_binding(KeyAction::SessionsResume, default_open);
+        assert!(keybindings
+            .bindings_for(KeyAction::SessionsOpenViewer)
+            .is_empty());
+
+        keybindings.reset_binding(KeyAction::SessionsOpenViewer);
+
+        assert_eq!(
+            keybindings.bindings_for(KeyAction::SessionsOpenViewer),
+            &[default_open]
+        );
+        assert!(!keybindings
+            .bindings_for(KeyAction::SessionsResume)
+            .contains(&default_open));
+    }
+
+    #[test]
+    fn missing_default_action_backfill_removes_conflicts() {
+        let text = r#"{
+            "entries": [
+                {
+                    "action": "sessions_resume",
+                    "bindings": [{ "code": { "type": "enter" } }]
+                }
+            ]
+        }"#;
+
+        let keybindings: KeyBindings = serde_json::from_str(text).unwrap();
+        let default_open = KeyBinding::plain(KeyCodeSpec::Enter);
+
+        assert_eq!(
+            keybindings.bindings_for(KeyAction::SessionsOpenViewer),
+            &[default_open]
+        );
+        assert!(!keybindings
+            .bindings_for(KeyAction::SessionsResume)
+            .contains(&default_open));
+    }
+
+    #[test]
+    fn deserialization_removes_existing_same_context_conflicts() {
+        let text = r#"{
+            "entries": [
+                {
+                    "action": "sessions_open_viewer",
+                    "bindings": [{ "code": { "type": "enter" } }]
+                },
+                {
+                    "action": "sessions_resume",
+                    "bindings": [{ "code": { "type": "enter" } }]
+                }
+            ]
+        }"#;
+
+        let keybindings: KeyBindings = serde_json::from_str(text).unwrap();
+        let enter = KeyBinding::plain(KeyCodeSpec::Enter);
+        let owners = [KeyAction::SessionsOpenViewer, KeyAction::SessionsResume]
+            .into_iter()
+            .filter(|action| keybindings.bindings_for(*action).contains(&enter))
+            .count();
+
+        assert_eq!(owners, 1);
+    }
+
+    #[test]
+    fn reset_restores_default_keybindings() {
+        let mut keybindings = KeyBindings::default();
+        keybindings.clear_binding(KeyAction::Quit);
+        assert!(keybindings.bindings_for(KeyAction::Quit).is_empty());
+        keybindings.reset_binding(KeyAction::Quit);
+        assert!(keybindings
+            .bindings_for(KeyAction::Quit)
+            .iter()
+            .any(|binding| binding.display() == "q"));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::adapter::conversation::{Block as CBlock, ConversationEvent};
 use crate::adapter::types::{MessageRole, SessionMeta};
 use crate::app::{App, ConversationCache, ExpandMode, Mode};
 use crate::i18n::t;
-use crate::settings;
+use crate::settings::{self, KeyAction};
 use crate::tui::theme;
 
 /// Cached flattened transcript — kept outside of `AppState` so `draw()` can
@@ -246,19 +246,49 @@ fn render_footer(frame: &mut Frame, area: Rect, cache: Option<&ConversationCache
         ExpandMode::Collapsed => t("viewer.collapsed"),
         ExpandMode::Expanded => t("viewer.expanded"),
     };
+    let keybindings = settings::get().keybindings;
     let footer = Paragraph::new(Line::from(vec![
-        Span::styled(" Esc ", Style::default()),
+        Span::styled(
+            format!(" {} ", keybindings.binding_display(KeyAction::ViewerBack)),
+            Style::default(),
+        ),
         Span::styled(format!("{} ", t("footer.back")), theme::muted()),
-        Span::styled(" j/k ", Style::default()),
+        Span::styled(
+            format!(
+                " {} ",
+                keybindings.binding_display(KeyAction::ViewerScrollDown)
+            ),
+            Style::default(),
+        ),
         Span::styled(format!("{} ", t("footer.scroll")), theme::muted()),
-        Span::styled(" Ctrl+D/U ", Style::default()),
+        Span::styled(
+            format!(
+                " {} ",
+                keybindings.binding_display(KeyAction::ViewerHalfPageDown)
+            ),
+            Style::default(),
+        ),
         Span::styled(format!("{} ", t("footer.half_page")), theme::muted()),
-        Span::styled(" g/G ", Style::default()),
+        Span::styled(
+            format!(" {} ", keybindings.binding_display(KeyAction::ViewerTop)),
+            Style::default(),
+        ),
         Span::styled(format!("{} ", t("footer.top_bottom")), theme::muted()),
-        Span::styled(" e/c ", Style::default()),
+        Span::styled(
+            format!(" {} ", keybindings.binding_display(KeyAction::ViewerExpand)),
+            Style::default(),
+        ),
         Span::styled(format!("{} ", t("footer.expand_collapse")), theme::muted()),
-        Span::styled(" r ", Style::default()),
+        Span::styled(
+            format!(" {} ", keybindings.binding_display(KeyAction::ViewerResume)),
+            Style::default(),
+        ),
         Span::styled(format!("{} ", t("footer.resume")), theme::muted()),
+        Span::styled(
+            format!(" {} ", keybindings.binding_display(KeyAction::ViewerDelete)),
+            Style::default(),
+        ),
+        Span::styled(format!("{} ", t("footer.delete")), theme::muted()),
         Span::styled(
             format!(
                 " [{expand_label} · {total} {} · row {scroll}] ",

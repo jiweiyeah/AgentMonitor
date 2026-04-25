@@ -11,6 +11,7 @@ use crate::adapter::{ClaudeAdapter, CodexAdapter, DynAdapter};
 use crate::collector::metrics::{MetricsStore, ProcessEntry};
 use crate::collector::token_refresh::TokenCache;
 use crate::config::Config;
+use crate::keybinding::KeyAction;
 
 /// Active tab in the TUI. Process details used to live in their own tab but
 /// are now embedded in the Dashboard — the old `Tab::Process` was redundant
@@ -245,6 +246,48 @@ impl AppState {
             .iter()
             .position(|&idx| self.sessions[idx].path == path)
     }
+
+    /// Remove a session from the in-memory snapshot and clear any cached UI
+    /// state that was pointing at it.
+    pub fn remove_session_path(&mut self, path: &Path) -> bool {
+        let before_len = self.sessions.len();
+        self.sessions.retain(|m| m.path != path);
+        let removed_session = self.sessions.len() != before_len;
+
+        if removed_session {
+            self.selected_session = if self.sessions.is_empty() {
+                0
+            } else {
+                self.selected_session.min(self.sessions.len() - 1)
+            };
+        }
+
+        let mut cleared_state = false;
+        if self
+            .preview
+            .as_ref()
+            .is_some_and(|preview| preview.path == path)
+        {
+            self.preview = None;
+            cleared_state = true;
+        }
+        if self
+            .conversation
+            .as_ref()
+            .is_some_and(|conversation| conversation.path == path)
+        {
+            self.conversation = None;
+            cleared_state = true;
+        }
+        if matches!(&self.mode, Mode::Viewer { path: viewer_path } if viewer_path == path) {
+            self.mode = Mode::Normal;
+            cleared_state = true;
+        }
+        if removed_session || cleared_state {
+            self.dirty = true;
+        }
+        removed_session || cleared_state
+    }
 }
 
 fn session_matches_filter(s: &SessionMeta, tokens: &[String]) -> bool {
@@ -349,6 +392,18 @@ pub struct PreviewCache {
     pub loading: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DeleteConfirm {
+    pub path: PathBuf,
+    pub error: Option<String>,
+}
+
+impl DeleteConfirm {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, error: None }
+    }
+}
+
 /// App bundles shared state, config, adapters, and metric store.
 pub struct App {
     pub config: Config,
@@ -363,10 +418,16 @@ pub struct App {
     /// `q` and `Esc` so they edit the filter instead of quitting.
     pub session_filter_input: bool,
     pub session_sort: SessionSort,
+    /// Pending destructive action confirmation for deleting a session file.
+    pub delete_confirm: Option<DeleteConfirm>,
     /// Process-tab row selection. Indexes into `metrics.snapshot()`.
     pub selected_process: usize,
     /// Settings-tab row selection. Indexes into `SettingsItem::all()`.
     pub selected_setting: usize,
+    pub settings_keybindings_open: bool,
+    pub selected_keybinding: usize,
+    pub capturing_keybinding: Option<KeyAction>,
+    pub keybinding_conflict: Option<KeyAction>,
     /// Per-session token cache (`(path, mtime) → tokens + message_count`).
     /// Fed by `collector::token_refresh` in the background so the Dashboard
     /// aggregates and the Sessions list see accurate numbers without waiting
@@ -393,8 +454,13 @@ impl App {
             session_filter: String::new(),
             session_filter_input: false,
             session_sort: SessionSort::default(),
+            delete_confirm: None,
             selected_process: 0,
             selected_setting: 0,
+            settings_keybindings_open: false,
+            selected_keybinding: 0,
+            capturing_keybinding: None,
+            keybinding_conflict: None,
             token_cache,
         };
         app.initial_scan().await?;
@@ -740,5 +806,117 @@ mod tests {
         toggle_filter_token(&mut filter, "status:active");
         assert!(!filter_has_token(&filter, "status:active"));
         assert_eq!(filter, "agent:codex branch:main");
+    }
+
+    #[test]
+    fn remove_session_path_clears_related_caches_and_clamps_selection() {
+        let keep = mk(SessionFixture {
+            agent: "claude",
+            id: "keep",
+            cwd: Some("/repos/keep"),
+            size: 10,
+            msgs: 1,
+            updated_minutes_ago: 5,
+            token_total: 100,
+            status: SessionStatus::Active,
+        });
+        let remove = mk(SessionFixture {
+            agent: "codex",
+            id: "remove",
+            cwd: Some("/repos/remove"),
+            size: 20,
+            msgs: 2,
+            updated_minutes_ago: 0,
+            token_total: 200,
+            status: SessionStatus::Idle,
+        });
+
+        let remove_path = remove.path.clone();
+        let mut state = AppState {
+            sessions: vec![keep.clone(), remove.clone()],
+            selected_session: 1,
+            dirty: false,
+            preview: Some(PreviewCache {
+                path: remove_path.clone(),
+                messages: Vec::new(),
+                message_count: 2,
+                loading: false,
+            }),
+            mode: Mode::Viewer {
+                path: remove_path.clone(),
+            },
+            conversation: Some(ConversationCache::loading(remove_path.clone())),
+        };
+
+        state.remove_session_path(&remove_path);
+
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].path, keep.path);
+        assert_eq!(state.selected_session, 0);
+        assert!(state.preview.is_none());
+        assert!(state.conversation.is_none());
+        assert!(matches!(state.mode, Mode::Normal));
+        assert!(state.dirty);
+    }
+
+    #[test]
+    fn remove_session_path_keeps_unrelated_preview_and_viewer() {
+        let keep = mk(SessionFixture {
+            agent: "claude",
+            id: "keep",
+            cwd: Some("/repos/keep"),
+            size: 10,
+            msgs: 1,
+            updated_minutes_ago: 0,
+            token_total: 100,
+            status: SessionStatus::Active,
+        });
+        let remove = mk(SessionFixture {
+            agent: "codex",
+            id: "remove",
+            cwd: Some("/repos/remove"),
+            size: 20,
+            msgs: 2,
+            updated_minutes_ago: 5,
+            token_total: 200,
+            status: SessionStatus::Idle,
+        });
+
+        let keep_path = keep.path.clone();
+        let remove_path = remove.path.clone();
+        let mut state = AppState {
+            sessions: vec![keep.clone(), remove],
+            selected_session: 1,
+            dirty: false,
+            preview: Some(PreviewCache {
+                path: keep_path.clone(),
+                messages: Vec::new(),
+                message_count: 1,
+                loading: false,
+            }),
+            mode: Mode::Viewer {
+                path: keep_path.clone(),
+            },
+            conversation: Some(ConversationCache::loading(keep_path.clone())),
+        };
+
+        state.remove_session_path(&remove_path);
+
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.sessions[0].path, keep_path);
+        assert_eq!(state.selected_session, 0);
+        assert_eq!(
+            state.preview.as_ref().map(|p| p.path.clone()),
+            Some(keep_path.clone())
+        );
+        assert!(matches!(
+            state.mode,
+            Mode::Viewer { path } if path == keep_path
+        ));
+        assert_eq!(
+            state.conversation.as_ref().map(|c| c.path.clone()),
+            Some(keep_path)
+        );
+        assert!(state.dirty);
     }
 }

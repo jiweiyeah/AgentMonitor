@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,11 +12,12 @@ use ratatui::Terminal;
 use tokio::sync::Notify;
 
 use crate::adapter::{adapter_for_path, DynAdapter};
+use crate::adapter::types::SessionStatus;
 use crate::app::{
-    toggle_filter_token, App, ConversationCache, ExpandMode, Mode, PreviewCache, Tab,
+    toggle_filter_token, App, ConversationCache, DeleteConfirm, ExpandMode, Mode, PreviewCache, Tab,
 };
 use crate::collector::{fs_watch, proc_sampler, token_refresh};
-use crate::settings::TerminalApp;
+use crate::settings::{KeyAction, KeyBinding, TerminalApp};
 use crate::tui::render;
 use crate::tui::settings::SettingsItem;
 
@@ -234,6 +236,9 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
         app.should_quit = true;
         return true;
     }
+    if app.delete_confirm.is_some() {
+        return handle_delete_confirm(key.code, key.modifiers, app);
+    }
     let mode = app.state.read().mode.clone();
     match mode {
         Mode::Normal => handle_normal(key.code, key.modifiers, app),
@@ -242,92 +247,271 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
 }
 
 fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {
+    if app.capturing_keybinding.is_some() && app.tab == Tab::Settings {
+        handle_keybinding_capture(code, modifiers, app);
+        return false;
+    }
+    if app.settings_keybindings_open && app.tab == Tab::Settings {
+        handle_settings_keybindings(code, modifiers, app);
+        return false;
+    }
     // Sessions-tab filter input swallows printable keys, Backspace, Esc and
     // Enter so they don't trigger normal-mode actions while the user is typing.
     if app.session_filter_input && app.tab == Tab::Sessions {
-        handle_session_filter_input(code, app);
+        handle_session_filter_input(code, modifiers, app);
+        return false;
+    }
+    if handle_tab_specific_normal_action(code, modifiers, app) {
         return false;
     }
     match (code, modifiers) {
-        (KeyCode::Char('q'), _) => {
+        (code, modifiers) if key_matches(KeyAction::Quit, code, modifiers) => {
             app.should_quit = true;
             return true;
         }
-        (KeyCode::Tab, _) => app.cycle_tab_next(),
-        (KeyCode::BackTab, _) => app.cycle_tab_prev(),
-        (KeyCode::Char('1'), _) => app.set_tab(Tab::Dashboard),
-        (KeyCode::Char('2'), _) => app.set_tab(Tab::Sessions),
-        (KeyCode::Char('3'), _) => app.set_tab(Tab::Settings),
-        (KeyCode::Char('j') | KeyCode::Down, _) => move_selection(app, 1),
-        (KeyCode::Char('k') | KeyCode::Up, _) => move_selection(app, -1),
-        (KeyCode::Enter, _) if app.tab == Tab::Dashboard => {
-            jump_to_selected_process_session(app);
+        (code, modifiers) if key_matches(KeyAction::TabNext, code, modifiers) => {
+            app.cycle_tab_next()
         }
-        (KeyCode::Right, _) if app.tab == Tab::Settings => {
-            cycle_selected_setting(app, true);
+        (code, modifiers) if key_matches(KeyAction::TabPrevious, code, modifiers) => {
+            app.cycle_tab_prev()
         }
-        (KeyCode::Left, _) if app.tab == Tab::Settings => {
-            cycle_selected_setting(app, false);
+        (code, modifiers) if key_matches(KeyAction::OpenDashboardTab, code, modifiers) => {
+            app.set_tab(Tab::Dashboard)
         }
-        (KeyCode::Enter, _) if app.tab == Tab::Settings => {
-            cycle_selected_setting(app, true);
+        (code, modifiers) if key_matches(KeyAction::OpenSessionsTab, code, modifiers) => {
+            app.set_tab(Tab::Sessions)
         }
-        (KeyCode::Right, _) => app.cycle_tab_next(),
-        (KeyCode::Left, _) => app.cycle_tab_prev(),
-        (KeyCode::Enter, _) if app.tab == Tab::Sessions => {
-            let path = current_selected_path(app);
-            if let Some(p) = path {
-                {
-                    let mut s = app.state.write();
-                    s.mode = Mode::Viewer { path: p.clone() };
-                    s.dirty = true;
-                }
-                ensure_conversation(app, &p, false);
-            }
+        (code, modifiers) if key_matches(KeyAction::OpenSettingsTab, code, modifiers) => {
+            app.set_tab(Tab::Settings)
         }
-        (KeyCode::Char('/'), _) if app.tab == Tab::Sessions => {
-            app.session_filter_input = true;
-            app.state.write().dirty = true;
+        (code, modifiers) if key_matches(KeyAction::MoveDown, code, modifiers) => {
+            move_selection(app, 1)
         }
-        (KeyCode::Char('s'), _) if app.tab == Tab::Sessions => {
-            app.session_sort = app.session_sort.cycle();
-            let mut s = app.state.write();
-            s.selected_session = 0;
-            s.dirty = true;
+        (code, modifiers) if key_matches(KeyAction::MoveUp, code, modifiers) => {
+            move_selection(app, -1)
         }
-        (KeyCode::Char('a'), _) if app.tab == Tab::Sessions => {
-            toggle_filter_token(&mut app.session_filter, "status:active");
-            let mut s = app.state.write();
-            s.selected_session = 0;
-            s.dirty = true;
-        }
-        (KeyCode::Char('c'), _) if app.tab == Tab::Sessions => {
-            app.session_filter.clear();
-            let mut s = app.state.write();
-            s.selected_session = 0;
-            s.dirty = true;
-        }
-        (KeyCode::Char('f'), _) if app.tab == Tab::Settings => {
-            // Settings tab: 'f' is refresh (rescan), not the 'r' reset shortcut.
+        (code, modifiers) if key_matches(KeyAction::Refresh, code, modifiers) => {
             rescan_sessions(app);
-        }
-        (KeyCode::Char('f'), _) => {
-            // Manual refresh — one-shot scan. Must not clobber tokens: the
-            // fast-parse path can't reproduce them, so preserve whatever
-            // token_refresh already wrote into state for each path.
-            rescan_sessions(app);
-        }
-        (KeyCode::Char('r'), _) if app.tab == Tab::Sessions => {
-            // Resume selected session in a new Terminal window.
-            resume_session(app);
-        }
-        (KeyCode::Char('r'), _) if app.tab == Tab::Settings => {
-            crate::tui::settings::reset_to_defaults();
-            app.state.write().dirty = true;
         }
         _ => {}
     }
     false
+}
+
+fn handle_tab_specific_normal_action(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    app: &mut App,
+) -> bool {
+    match (code, modifiers) {
+        (code, modifiers)
+            if app.tab == Tab::Dashboard
+                && key_matches(KeyAction::DashboardJumpSession, code, modifiers) =>
+        {
+            jump_to_selected_process_session(app);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Settings
+                && key_matches(KeyAction::SettingsChangeNext, code, modifiers) =>
+        {
+            activate_or_cycle_selected_setting(app, true);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Settings
+                && key_matches(KeyAction::SettingsChangePrevious, code, modifiers) =>
+        {
+            activate_or_cycle_selected_setting(app, false);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Settings
+                && key_matches(KeyAction::SettingsActivate, code, modifiers) =>
+        {
+            activate_or_cycle_selected_setting(app, true);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Settings
+                && key_matches(KeyAction::SettingsReset, code, modifiers) =>
+        {
+            crate::tui::settings::reset_to_defaults();
+            app.state.write().dirty = true;
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsOpenViewer, code, modifiers) =>
+        {
+            open_selected_session_viewer(app);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsStartFilter, code, modifiers) =>
+        {
+            app.session_filter_input = true;
+            app.state.write().dirty = true;
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsCycleSort, code, modifiers) =>
+        {
+            app.session_sort = app.session_sort.cycle();
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsToggleActiveOnly, code, modifiers) =>
+        {
+            toggle_filter_token(&mut app.session_filter, "status:active");
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsClearFilter, code, modifiers) =>
+        {
+            app.session_filter.clear();
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsResume, code, modifiers) =>
+        {
+            resume_session(app);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsDelete, code, modifiers) =>
+        {
+            prompt_delete_selected_session(app);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn open_selected_session_viewer(app: &mut App) {
+    let path = current_selected_path(app);
+    if let Some(p) = path {
+        {
+            let mut s = app.state.write();
+            s.mode = Mode::Viewer { path: p.clone() };
+            s.dirty = true;
+        }
+        ensure_conversation(app, &p, false);
+    }
+}
+
+fn key_matches(action: KeyAction, code: KeyCode, modifiers: KeyModifiers) -> bool {
+    crate::settings::get()
+        .keybindings
+        .matches_action(action, code, modifiers)
+}
+
+fn selected_keybinding_action(app: &App) -> Option<KeyAction> {
+    KeyAction::all().get(app.selected_keybinding).copied()
+}
+
+fn handle_settings_keybindings(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    match (code, modifiers) {
+        (code, modifiers) if key_matches(KeyAction::SettingsCancel, code, modifiers) => {
+            app.settings_keybindings_open = false;
+            app.keybinding_conflict = None;
+            app.state.write().dirty = true;
+        }
+        (code, modifiers) if key_matches(KeyAction::SettingsActivate, code, modifiers) => {
+            app.capturing_keybinding = selected_keybinding_action(app);
+            app.keybinding_conflict = None;
+            app.state.write().dirty = true;
+        }
+        (code, modifiers) if key_matches(KeyAction::SettingsClearKeybinding, code, modifiers) => {
+            if let Some(action) = selected_keybinding_action(app) {
+                crate::settings::update(|settings| settings.keybindings.clear_binding(action));
+                app.keybinding_conflict = None;
+                app.state.write().dirty = true;
+            }
+        }
+        (code, modifiers) if key_matches(KeyAction::SettingsReset, code, modifiers) => {
+            if let Some(action) = selected_keybinding_action(app) {
+                crate::settings::update(|settings| settings.keybindings.reset_binding(action));
+                app.keybinding_conflict = None;
+                app.state.write().dirty = true;
+            }
+        }
+        (code, modifiers) if key_matches(KeyAction::SettingsResetAllKeybindings, code, modifiers) => {
+            crate::settings::update(|settings| settings.keybindings.reset_all());
+            app.keybinding_conflict = None;
+            app.state.write().dirty = true;
+        }
+        (code, modifiers) if key_matches(KeyAction::MoveDown, code, modifiers) => {
+            move_keybinding_selection(app, 1)
+        }
+        (code, modifiers) if key_matches(KeyAction::MoveUp, code, modifiers) => {
+            move_keybinding_selection(app, -1)
+        }
+        _ => {}
+    }
+}
+
+fn handle_keybinding_capture(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    if key_matches(KeyAction::SettingsCancel, code, modifiers) {
+        app.capturing_keybinding = None;
+        app.keybinding_conflict = None;
+        app.state.write().dirty = true;
+        return;
+    }
+    let Some(action) = app.capturing_keybinding else {
+        return;
+    };
+    let Some(binding) = KeyBinding::from_event(code, modifiers) else {
+        return;
+    };
+    let conflict = crate::settings::get()
+        .keybindings
+        .conflict_for(action, binding);
+    crate::settings::update(|settings| {
+        settings.keybindings.set_binding(action, binding);
+    });
+    app.keybinding_conflict = conflict;
+    app.capturing_keybinding = None;
+    app.state.write().dirty = true;
+}
+
+fn move_keybinding_selection(app: &mut App, delta: i32) {
+    let len = KeyAction::all().len();
+    if len == 0 {
+        return;
+    }
+    app.selected_keybinding = clamp_step(app.selected_keybinding, delta, len);
+    app.state.write().dirty = true;
+}
+
+fn activate_or_cycle_selected_setting(app: &mut App, forward: bool) {
+    let items = SettingsItem::all();
+    if items.is_empty() {
+        return;
+    }
+    let idx = app.selected_setting.min(items.len() - 1);
+    if items[idx] == SettingsItem::Keybindings {
+        app.settings_keybindings_open = true;
+        app.keybinding_conflict = None;
+        app.state.write().dirty = true;
+        return;
+    }
+    cycle_selected_setting(app, forward);
 }
 
 fn cycle_selected_setting(app: &mut App, forward: bool) {
@@ -347,26 +531,26 @@ fn cycle_selected_setting(app: &mut App, forward: bool) {
 /// Handle key events while the Sessions filter input is active. Esc cancels
 /// the filter, Enter commits it (leaving input mode), Backspace deletes, and
 /// any printable character is appended.
-fn handle_session_filter_input(code: KeyCode, app: &mut App) {
-    match code {
-        KeyCode::Esc => {
+fn handle_session_filter_input(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    match (code, modifiers) {
+        (code, modifiers) if key_matches(KeyAction::FilterCancel, code, modifiers) => {
             app.session_filter.clear();
             app.session_filter_input = false;
             let mut s = app.state.write();
             s.selected_session = 0;
             s.dirty = true;
         }
-        KeyCode::Enter => {
+        (code, modifiers) if key_matches(KeyAction::FilterApply, code, modifiers) => {
             app.session_filter_input = false;
             app.state.write().dirty = true;
         }
-        KeyCode::Backspace => {
+        (code, modifiers) if key_matches(KeyAction::FilterDeleteChar, code, modifiers) => {
             app.session_filter.pop();
             let mut s = app.state.write();
             s.selected_session = 0;
             s.dirty = true;
         }
-        KeyCode::Char(c) if !c.is_control() => {
+        (KeyCode::Char(c), _) if !c.is_control() => {
             app.session_filter.push(c);
             let mut s = app.state.write();
             s.selected_session = 0;
@@ -450,27 +634,62 @@ fn clamp_step(cur: usize, delta: i32, len: usize) -> usize {
     }
 }
 
-fn handle_viewer(code: KeyCode, _modifiers: KeyModifiers, app: &mut App, _path: &Path) -> bool {
-    match (code, _modifiers) {
-        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => {
+fn handle_viewer(code: KeyCode, modifiers: KeyModifiers, app: &mut App, path: &Path) -> bool {
+    match (code, modifiers) {
+        (code, modifiers) if key_matches(KeyAction::ViewerBack, code, modifiers) => {
             let mut s = app.state.write();
             s.mode = Mode::Normal;
             s.dirty = true;
         }
-        (KeyCode::Char('j') | KeyCode::Down, _) => scroll_by(app, 1),
-        (KeyCode::Char('k') | KeyCode::Up, _) => scroll_by(app, -1),
-        (KeyCode::Char('d'), m) if m.contains(KeyModifiers::CONTROL) => scroll_half(app, 1),
-        (KeyCode::Char('u'), m) if m.contains(KeyModifiers::CONTROL) => scroll_half(app, -1),
-        (KeyCode::PageDown, _) => scroll_page(app, 1),
-        (KeyCode::PageUp, _) => scroll_page(app, -1),
-        (KeyCode::Char('g'), _) => set_scroll(app, 0),
-        (KeyCode::Char('G'), _) => set_scroll(app, u16::MAX),
-        (KeyCode::Char('e'), _) => set_expand(app, ExpandMode::Expanded),
-        (KeyCode::Char('c'), _) => set_expand(app, ExpandMode::Collapsed),
-        (KeyCode::Char('r'), _) => {
-            // Resume works from viewer too — the viewed session is the one
-            // being resumed (not the list-selected one).
-            resume_session_from_viewer(app, _path);
+        (code, modifiers) if key_matches(KeyAction::ViewerScrollDown, code, modifiers) => {
+            scroll_by(app, 1)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerScrollUp, code, modifiers) => {
+            scroll_by(app, -1)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerHalfPageDown, code, modifiers) => {
+            scroll_half(app, 1)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerHalfPageUp, code, modifiers) => {
+            scroll_half(app, -1)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerPageDown, code, modifiers) => {
+            scroll_page(app, 1)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerPageUp, code, modifiers) => {
+            scroll_page(app, -1)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerTop, code, modifiers) => {
+            set_scroll(app, 0)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerBottom, code, modifiers) => {
+            set_scroll(app, u16::MAX)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerExpand, code, modifiers) => {
+            set_expand(app, ExpandMode::Expanded)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerCollapse, code, modifiers) => {
+            set_expand(app, ExpandMode::Collapsed)
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerResume, code, modifiers) => {
+            resume_session_from_viewer(app, path);
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerDelete, code, modifiers) => {
+            prompt_delete_for_path(app, path)
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_delete_confirm(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {
+    match (code, modifiers) {
+        (code, modifiers) if key_matches(KeyAction::DeleteCancel, code, modifiers) => {
+            app.delete_confirm = None;
+            app.state.write().dirty = true;
+        }
+        (code, modifiers) if key_matches(KeyAction::DeleteConfirm, code, modifiers) => {
+            confirm_delete(app);
         }
         _ => {}
     }
@@ -557,6 +776,76 @@ fn rescan_sessions(app: &App) {
         fresh.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         fs_watch::replace_preserving_tokens(&state, fresh);
     });
+}
+
+fn prompt_delete_selected_session(app: &mut App) {
+    let Some(path) = current_selected_path(app) else {
+        return;
+    };
+    prompt_delete_for_path(app, &path);
+}
+
+fn prompt_delete_for_path(app: &mut App, path: &Path) {
+    app.delete_confirm = Some(DeleteConfirm::new(path.to_path_buf()));
+    app.state.write().dirty = true;
+}
+
+fn confirm_delete(app: &mut App) {
+    let Some(path) = app
+        .delete_confirm
+        .as_ref()
+        .map(|confirm| confirm.path.clone())
+    else {
+        return;
+    };
+
+    if let Err(err) = std::fs::metadata(&path) {
+        if err.kind() == ErrorKind::NotFound {
+            clear_deleted_session(app, &path);
+            app.delete_confirm = None;
+            return;
+        }
+    }
+
+    if session_is_active(app, &path) {
+        if let Some(confirm) = app.delete_confirm.as_mut() {
+            confirm.error = Some("Refusing to delete an active session".to_string());
+        }
+        app.state.write().dirty = true;
+        return;
+    }
+
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            clear_deleted_session(app, &path);
+            app.delete_confirm = None;
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            clear_deleted_session(app, &path);
+            app.delete_confirm = None;
+        }
+        Err(err) => {
+            if let Some(confirm) = app.delete_confirm.as_mut() {
+                confirm.error = Some(err.to_string());
+            }
+            app.state.write().dirty = true;
+            tracing::warn!(path = %path.display(), ?err, "failed to delete session file");
+        }
+    }
+}
+
+fn clear_deleted_session(app: &App, path: &Path) {
+    app.token_cache.remove(path);
+    app.state.write().remove_session_path(path);
+}
+
+fn session_is_active(app: &App, path: &Path) -> bool {
+    app.state
+        .read()
+        .sessions
+        .iter()
+        .find(|session| session.path == path)
+        .is_some_and(|session| session.status == SessionStatus::Active)
 }
 
 /// Resume the currently list-selected session (Normal mode).
@@ -781,14 +1070,173 @@ mod tests {
             session_filter: String::new(),
             session_filter_input: false,
             session_sort: SessionSort::default(),
+            delete_confirm: None,
             selected_process: 0,
             selected_setting: 0,
+            settings_keybindings_open: false,
+            selected_keybinding: 0,
+            capturing_keybinding: None,
+            keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
         }
     }
 
     #[test]
+    fn settings_right_key_changes_value_before_global_tab_switch() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.selected_setting = SettingsItem::Language as usize;
+        let original_language = crate::settings::get().language;
+
+        handle_normal(KeyCode::Right, KeyModifiers::empty(), &mut app);
+
+        assert_eq!(app.tab, Tab::Settings);
+        assert_ne!(crate::settings::get().language, original_language);
+        crate::settings::settings().write().language = original_language;
+    }
+
+    #[test]
+    fn normal_mode_uses_configured_quit_binding() {
+        let _guard = crate::settings::test_lock();
+        let original = crate::settings::get().keybindings;
+        crate::settings::settings().write().keybindings.set_binding(
+            crate::settings::KeyAction::Quit,
+            crate::settings::KeyBinding::plain(crate::settings::KeyCodeSpec::Char('x')),
+        );
+
+        let mut app = test_app();
+        let q_should_exit = handle_normal(KeyCode::Char('q'), KeyModifiers::empty(), &mut app);
+        assert!(!q_should_exit);
+        assert!(!app.should_quit);
+
+        let x_should_exit = handle_normal(KeyCode::Char('x'), KeyModifiers::empty(), &mut app);
+        assert!(x_should_exit);
+        assert!(app.should_quit);
+
+        crate::settings::settings().write().keybindings = original;
+    }
+
+    #[test]
+    fn settings_capture_rebinds_selected_action() {
+        let _guard = crate::settings::test_lock();
+        let original = crate::settings::get().keybindings;
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.settings_keybindings_open = true;
+        app.selected_keybinding = crate::settings::KeyAction::all()
+            .iter()
+            .position(|action| *action == crate::settings::KeyAction::Quit)
+            .unwrap();
+
+        handle_normal(KeyCode::Enter, KeyModifiers::empty(), &mut app);
+        assert_eq!(
+            app.capturing_keybinding,
+            Some(crate::settings::KeyAction::Quit)
+        );
+
+        handle_normal(KeyCode::Char('x'), KeyModifiers::empty(), &mut app);
+        assert_eq!(app.capturing_keybinding, None);
+        assert_eq!(
+            crate::settings::get()
+                .keybindings
+                .bindings_for(crate::settings::KeyAction::Quit)[0]
+                .display(),
+            "x"
+        );
+
+        crate::settings::settings().write().keybindings = original;
+    }
+
+    #[test]
+    fn settings_keybindings_panel_uses_configured_cancel_binding() {
+        let _guard = crate::settings::test_lock();
+        let original = crate::settings::get().keybindings;
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+        crate::settings::settings().write().keybindings.set_binding(
+            crate::settings::KeyAction::SettingsCancel,
+            crate::settings::KeyBinding::plain(crate::settings::KeyCodeSpec::Char('x')),
+        );
+
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.settings_keybindings_open = true;
+
+        handle_normal(KeyCode::Esc, KeyModifiers::empty(), &mut app);
+        assert!(app.settings_keybindings_open);
+
+        handle_normal(KeyCode::Char('x'), KeyModifiers::empty(), &mut app);
+        assert!(!app.settings_keybindings_open);
+
+        crate::settings::settings().write().keybindings = original;
+    }
+
+    #[test]
+    fn settings_capture_rebinds_selected_action_and_updates_normal_dispatch() {
+        let _guard = crate::settings::test_lock();
+        let original = crate::settings::get().keybindings;
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.settings_keybindings_open = true;
+        app.selected_keybinding = crate::settings::KeyAction::all()
+            .iter()
+            .position(|action| *action == crate::settings::KeyAction::Quit)
+            .unwrap();
+
+        handle_normal(KeyCode::Enter, KeyModifiers::empty(), &mut app);
+        handle_normal(KeyCode::Char('x'), KeyModifiers::empty(), &mut app);
+        app.settings_keybindings_open = false;
+        app.tab = Tab::Dashboard;
+
+        let old_should_exit = handle_normal(KeyCode::Char('q'), KeyModifiers::empty(), &mut app);
+        assert!(!old_should_exit);
+        assert!(!app.should_quit);
+
+        let new_should_exit = handle_normal(KeyCode::Char('x'), KeyModifiers::empty(), &mut app);
+        assert!(new_should_exit);
+        assert!(app.should_quit);
+
+        crate::settings::settings().write().keybindings = original;
+    }
+
+    #[test]
+    fn settings_capture_esc_cancels_without_change() {
+        let _guard = crate::settings::test_lock();
+        let original = crate::settings::get().keybindings;
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let mut app = test_app();
+        app.tab = Tab::Settings;
+        app.settings_keybindings_open = true;
+        app.selected_keybinding = crate::settings::KeyAction::all()
+            .iter()
+            .position(|action| *action == crate::settings::KeyAction::Quit)
+            .unwrap();
+
+        handle_normal(KeyCode::Enter, KeyModifiers::empty(), &mut app);
+        handle_normal(KeyCode::Esc, KeyModifiers::empty(), &mut app);
+        assert_eq!(app.capturing_keybinding, None);
+        assert_eq!(
+            crate::settings::get()
+                .keybindings
+                .bindings_for(crate::settings::KeyAction::Quit)[0]
+                .display(),
+            "q"
+        );
+
+        crate::settings::settings().write().keybindings = original;
+    }
+
+    #[test]
     fn esc_does_not_quit_in_normal_mode() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
         let mut app = test_app();
 
         let should_exit = handle_normal(KeyCode::Esc, KeyModifiers::empty(), &mut app);
@@ -799,12 +1247,485 @@ mod tests {
 
     #[test]
     fn q_quits_in_normal_mode() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
         let mut app = test_app();
 
         let should_exit = handle_normal(KeyCode::Char('q'), KeyModifiers::empty(), &mut app);
 
         assert!(should_exit);
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn d_in_sessions_opens_delete_confirmation_without_removing_file() {
+        let unique = format!(
+            "agentmonitor-delete-open-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("delete-me.jsonl");
+        std::fs::write(&session_path, "{}\n").expect("write session");
+
+        let mut app = test_app();
+        app.tab = Tab::Sessions;
+        app.state.write().sessions = vec![SessionMeta {
+            agent: "claude",
+            id: "delete-me".into(),
+            path: session_path.clone(),
+            cwd: Some(base.clone()),
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 0,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Idle,
+            byte_offset: 0,
+            size_bytes: 2,
+        }];
+
+        let should_exit = handle_normal(KeyCode::Char('d'), KeyModifiers::empty(), &mut app);
+
+        assert!(!should_exit);
+        assert_eq!(
+            app.delete_confirm
+                .as_ref()
+                .map(|confirm| confirm.path.as_path()),
+            Some(session_path.as_path())
+        );
+        assert!(session_path.exists(), "first press should not delete yet");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn delete_in_sessions_opens_delete_confirmation_without_removing_file() {
+        let unique = format!(
+            "agentmonitor-delete-key-open-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("delete-me.jsonl");
+        std::fs::write(&session_path, "{}\n").expect("write session");
+
+        let mut app = test_app();
+        app.tab = Tab::Sessions;
+        app.state.write().sessions = vec![SessionMeta {
+            agent: "claude",
+            id: "delete-me".into(),
+            path: session_path.clone(),
+            cwd: Some(base.clone()),
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 0,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Idle,
+            byte_offset: 0,
+            size_bytes: 2,
+        }];
+
+        let should_exit = handle_normal(KeyCode::Delete, KeyModifiers::empty(), &mut app);
+
+        assert!(!should_exit);
+        assert_eq!(
+            app.delete_confirm
+                .as_ref()
+                .map(|confirm| confirm.path.as_path()),
+            Some(session_path.as_path())
+        );
+        assert!(
+            session_path.exists(),
+            "Delete should not remove until confirmed"
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn delete_in_viewer_opens_delete_confirmation() {
+        let unique = format!(
+            "agentmonitor-viewer-delete-key-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("delete-me.jsonl");
+        std::fs::write(&session_path, "{}\n").expect("write session");
+
+        let mut app = test_app();
+        {
+            let mut state = app.state.write();
+            state.sessions = vec![SessionMeta {
+                agent: "claude",
+                id: "delete-me".into(),
+                path: session_path.clone(),
+                cwd: Some(base.clone()),
+                model: None,
+                version: None,
+                git_branch: None,
+                started_at: None,
+                updated_at: None,
+                message_count: 0,
+                tokens: TokenStats::default(),
+                status: SessionStatus::Idle,
+                byte_offset: 0,
+                size_bytes: 2,
+            }];
+            state.mode = Mode::Viewer {
+                path: session_path.clone(),
+            };
+        }
+
+        let should_exit = handle_viewer(
+            KeyCode::Delete,
+            KeyModifiers::empty(),
+            &mut app,
+            &session_path,
+        );
+
+        assert!(!should_exit);
+        assert_eq!(
+            app.delete_confirm
+                .as_ref()
+                .map(|confirm| confirm.path.as_path()),
+            Some(session_path.as_path())
+        );
+        assert!(
+            session_path.exists(),
+            "Delete should only open confirmation"
+        );
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn enter_with_delete_confirmation_removes_file_and_clears_viewer_state() {
+        let unique = format!(
+            "agentmonitor-delete-confirm-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("delete-me.jsonl");
+        std::fs::write(&session_path, "{\"type\":\"user\"}\n").expect("write session");
+
+        let mut app = test_app();
+        app.tab = Tab::Sessions;
+        app.state.write().sessions = vec![SessionMeta {
+            agent: "claude",
+            id: "delete-me".into(),
+            path: session_path.clone(),
+            cwd: Some(base.clone()),
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 1,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Idle,
+            byte_offset: 0,
+            size_bytes: 16,
+        }];
+        {
+            let mut state = app.state.write();
+            state.preview = Some(PreviewCache {
+                path: session_path.clone(),
+                messages: Vec::new(),
+                message_count: 1,
+                loading: false,
+            });
+            state.mode = Mode::Viewer {
+                path: session_path.clone(),
+            };
+            state.conversation = Some(ConversationCache::loading(session_path.clone()));
+        }
+        app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
+
+        let should_exit = handle_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            )),
+            &mut app,
+        );
+
+        assert!(!should_exit);
+        assert!(
+            !session_path.exists(),
+            "confirmed delete should remove the session file"
+        );
+        assert!(
+            app.delete_confirm.is_none(),
+            "prompt should close after success"
+        );
+        let state = app.state.read();
+        assert!(state.sessions.is_empty());
+        assert!(state.preview.is_none());
+        assert!(state.conversation.is_none());
+        assert!(matches!(state.mode, Mode::Normal));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn y_with_delete_confirmation_removes_file_and_clears_state() {
+        let unique = format!(
+            "agentmonitor-delete-key-confirm-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("delete-me.jsonl");
+        std::fs::write(&session_path, "{\"type\":\"user\"}\n").expect("write session");
+
+        let mut app = test_app();
+        app.tab = Tab::Sessions;
+        app.state.write().sessions = vec![SessionMeta {
+            agent: "claude",
+            id: "delete-me".into(),
+            path: session_path.clone(),
+            cwd: Some(base.clone()),
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 1,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Idle,
+            byte_offset: 0,
+            size_bytes: 16,
+        }];
+        app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
+
+        let should_exit = handle_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Char('y'),
+                KeyModifiers::empty(),
+            )),
+            &mut app,
+        );
+
+        assert!(!should_exit);
+        assert!(!session_path.exists(), "y should confirm deletion");
+        assert!(app.delete_confirm.is_none());
+        assert!(app.state.read().sessions.is_empty());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn delete_with_delete_confirmation_does_not_confirm_delete() {
+        let unique = format!(
+            "agentmonitor-delete-key-no-confirm-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("delete-me.jsonl");
+        std::fs::write(&session_path, "{\"type\":\"user\"}\n").expect("write session");
+
+        let mut app = test_app();
+        app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
+
+        let should_exit = handle_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Delete,
+                KeyModifiers::empty(),
+            )),
+            &mut app,
+        );
+
+        assert!(!should_exit);
+        assert!(session_path.exists(), "Delete should not confirm deletion");
+        assert!(app.delete_confirm.is_some());
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn active_session_delete_confirmation_keeps_file_and_prompt() {
+        let unique = format!(
+            "agentmonitor-delete-active-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("active.jsonl");
+        std::fs::write(&session_path, "{\"type\":\"user\"}\n").expect("write session");
+
+        let mut app = test_app();
+        app.state.write().sessions = vec![SessionMeta {
+            agent: "claude",
+            id: "active".into(),
+            path: session_path.clone(),
+            cwd: Some(base.clone()),
+            model: None,
+            version: None,
+            git_branch: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 1,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Active,
+            byte_offset: 0,
+            size_bytes: 16,
+        }];
+        app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
+
+        let should_exit = handle_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            )),
+            &mut app,
+        );
+
+        assert!(!should_exit);
+        assert!(session_path.exists(), "active sessions should not be deleted");
+        assert!(app.delete_confirm.is_some());
+        assert!(app
+            .delete_confirm
+            .as_ref()
+            .and_then(|confirm| confirm.error.as_ref())
+            .is_some());
+        assert_eq!(app.state.read().sessions.len(), 1);
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn missing_active_session_confirm_clears_prompt_and_cached_state() {
+        let unique = format!(
+            "agentmonitor-delete-missing-active-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("missing-active.jsonl");
+
+        let mut app = test_app();
+        {
+            let mut state = app.state.write();
+            state.sessions = vec![SessionMeta {
+                agent: "claude",
+                id: "active".into(),
+                path: session_path.clone(),
+                cwd: Some(base.clone()),
+                model: None,
+                version: None,
+                git_branch: None,
+                started_at: None,
+                updated_at: None,
+                message_count: 1,
+                tokens: TokenStats::default(),
+                status: SessionStatus::Active,
+                byte_offset: 0,
+                size_bytes: 16,
+            }];
+            state.preview = Some(PreviewCache {
+                path: session_path.clone(),
+                messages: Vec::new(),
+                message_count: 1,
+                loading: false,
+            });
+            state.mode = Mode::Viewer {
+                path: session_path.clone(),
+            };
+            state.conversation = Some(ConversationCache::loading(session_path.clone()));
+        }
+        app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
+
+        let should_exit = handle_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::empty(),
+            )),
+            &mut app,
+        );
+
+        assert!(!should_exit);
+        assert!(app.delete_confirm.is_none());
+        let state = app.state.read();
+        assert!(state.sessions.is_empty());
+        assert!(state.preview.is_none());
+        assert!(state.conversation.is_none());
+        assert!(matches!(state.mode, Mode::Normal));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn esc_with_delete_confirmation_cancels_without_removing_file() {
+        let unique = format!(
+            "agentmonitor-delete-cancel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).expect("create temp dir");
+        let session_path = base.join("delete-me.jsonl");
+        std::fs::write(&session_path, "{}\n").expect("write session");
+
+        let mut app = test_app();
+        app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
+
+        let should_exit = handle_event(
+            Event::Key(crossterm::event::KeyEvent::new(
+                KeyCode::Esc,
+                KeyModifiers::empty(),
+            )),
+            &mut app,
+        );
+
+        assert!(!should_exit);
+        assert!(app.delete_confirm.is_none());
+        assert!(session_path.exists(), "cancel should keep the session file");
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[tokio::test]
@@ -880,8 +1801,13 @@ mod tests {
             session_filter: String::new(),
             session_filter_input: false,
             session_sort: SessionSort::default(),
+            delete_confirm: None,
             selected_process: 0,
             selected_setting: 0,
+            settings_keybindings_open: false,
+            selected_keybinding: 0,
+            capturing_keybinding: None,
+            keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
         };
 

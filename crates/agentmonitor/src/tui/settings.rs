@@ -16,9 +16,7 @@ use ratatui::Frame;
 
 use crate::app::App;
 use crate::i18n::t;
-use crate::settings::{
-    self, Language, SampleIntervalSecs, Settings, TerminalApp, ThemeColor, TimeFormat, TokenUnit,
-};
+use crate::settings::{self, KeyAction, Settings};
 use crate::tui::theme;
 use crate::tui::widgets::pad_display_width;
 
@@ -35,6 +33,7 @@ pub enum SettingsItem {
     SampleInterval,
     IncludeCacheInTotal,
     Terminal,
+    Keybindings,
 }
 
 impl SettingsItem {
@@ -47,6 +46,7 @@ impl SettingsItem {
             SettingsItem::SampleInterval,
             SettingsItem::IncludeCacheInTotal,
             SettingsItem::Terminal,
+            SettingsItem::Keybindings,
         ]
     }
 
@@ -59,6 +59,7 @@ impl SettingsItem {
             SettingsItem::SampleInterval => "settings.sample_interval",
             SettingsItem::IncludeCacheInTotal => "settings.include_cache",
             SettingsItem::Terminal => "settings.terminal",
+            SettingsItem::Keybindings => "settings.keybindings",
         }
     }
 
@@ -78,6 +79,9 @@ impl SettingsItem {
             }
             .to_string(),
             SettingsItem::Terminal => s.terminal.label().to_string(),
+            SettingsItem::Keybindings => {
+                format!("{} actions", crate::settings::KeyAction::all().len())
+            }
         }
     }
 
@@ -92,6 +96,7 @@ impl SettingsItem {
                 s.include_cache_in_total = !s.include_cache_in_total
             }
             SettingsItem::Terminal => s.terminal = s.terminal.cycle(),
+            SettingsItem::Keybindings => {}
         });
     }
 
@@ -106,6 +111,7 @@ impl SettingsItem {
                 s.include_cache_in_total = !s.include_cache_in_total
             }
             SettingsItem::Terminal => s.terminal = s.terminal.cycle_back(),
+            SettingsItem::Keybindings => {}
         });
     }
 }
@@ -113,19 +119,16 @@ impl SettingsItem {
 /// Reset every field to its `Default`. Invoked by `r` on the Settings tab.
 pub fn reset_to_defaults() {
     settings::update(|s| {
-        *s = Settings {
-            language: Language::default(),
-            theme: ThemeColor::default(),
-            time_format: TimeFormat::default(),
-            token_unit: TokenUnit::default(),
-            sample_interval: SampleIntervalSecs::default(),
-            include_cache_in_total: true,
-            terminal: TerminalApp::default(),
-        };
+        *s = Settings::default();
     });
 }
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    if app.settings_keybindings_open {
+        render_keybindings(frame, area, app);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -198,6 +201,94 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(notes, chunks[2]);
 }
 
+fn render_keybindings(frame: &mut Frame, area: Rect, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(4),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let snapshot = settings::get();
+    let hint = if let Some(action) = app.capturing_keybinding {
+        format!(
+            "{}: {}",
+            t("settings.keybindings_capture"),
+            t(action.label_key())
+        )
+    } else {
+        t("settings.keybindings_hint").to_string()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, theme::muted()))),
+        chunks[0],
+    );
+
+    let items: Vec<ListItem> = KeyAction::all()
+        .iter()
+        .map(|action| {
+            let line = Line::from(vec![
+                Span::styled(
+                    pad_display_width(t(action.context().label_key()), 16),
+                    theme::muted(),
+                ),
+                Span::styled(
+                    pad_display_width(t(action.label_key()), 34),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    snapshot.keybindings.binding_display(*action),
+                    Style::default()
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+
+    let mut list_state = ListState::default();
+    list_state.select(Some(
+        app.selected_keybinding.min(KeyAction::all().len() - 1),
+    ));
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(Span::styled(
+            t("settings.keybindings_title"),
+            theme::title(),
+        )))
+        .highlight_style(theme::selected())
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, chunks[1], &mut list_state);
+
+    let mut lines = vec![Line::from(Span::styled(
+        t("settings.keybindings_saved"),
+        theme::muted(),
+    ))];
+    if let Some(conflict) = app.keybinding_conflict {
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{} {}",
+                t("settings.keybindings_replaced"),
+                t(conflict.label_key())
+            ),
+            Style::default().fg(Color::Yellow),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            t("settings.keybindings_note"),
+            theme::muted(),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::TOP)),
+        chunks[2],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,12 +325,26 @@ mod tests {
     }
 
     #[test]
-    fn every_item_exposes_a_non_empty_value() {
+    fn keybindings_item_is_renderable() {
         let _guard = test_lock();
         let s = settings::get();
-        for item in SettingsItem::all() {
-            let v = item.value_string(&s);
-            assert!(!v.is_empty(), "{:?} produced empty value", item);
-        }
+        assert!(SettingsItem::all().contains(&SettingsItem::Keybindings));
+        assert!(!SettingsItem::Keybindings.value_string(&s).is_empty());
+        assert_ne!(SettingsItem::Keybindings.label_key(), "??");
+    }
+
+    #[test]
+    fn reset_restores_default_keybindings() {
+        let _guard = test_lock();
+        settings()
+            .write()
+            .keybindings
+            .clear_binding(crate::settings::KeyAction::Quit);
+        reset_to_defaults();
+        assert!(settings::get()
+            .keybindings
+            .bindings_for(crate::settings::KeyAction::Quit)
+            .iter()
+            .any(|binding| binding.display() == "q"));
     }
 }

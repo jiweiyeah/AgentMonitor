@@ -5,5 +5,6 @@ pub mod collector;
 pub mod config;
 pub mod event;
 pub mod i18n;
+pub mod keybinding;
 pub mod settings;
 pub mod tui;

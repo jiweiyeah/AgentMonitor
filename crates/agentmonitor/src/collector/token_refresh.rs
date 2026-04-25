@@ -76,6 +76,10 @@ impl TokenCache {
             },
         );
     }
+
+    pub fn remove(&self, path: &Path) {
+        self.inner.write().remove(path);
+    }
 }
 
 pub async fn run(
