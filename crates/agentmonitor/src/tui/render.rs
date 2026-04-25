@@ -86,6 +86,11 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(format!("{} ", t("footer.refresh")), theme::muted()));
                 spans.push(Span::styled(" / ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.filter")), theme::muted()));
+                spans.push(Span::styled(" a ", Style::default()));
+                spans.push(Span::styled(
+                    format!("{} ", t("footer.active_only")),
+                    theme::muted(),
+                ));
                 spans.push(Span::styled(" s ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.sort")), theme::muted()));
                 spans.push(Span::styled(" c ", Style::default()));
@@ -98,6 +103,11 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
             Tab::Dashboard => {
                 spans.push(Span::styled(" f ", Style::default()));
                 spans.push(Span::styled(format!("{} ", t("footer.refresh")), theme::muted()));
+                spans.push(Span::styled(" Enter ", Style::default()));
+                spans.push(Span::styled(
+                    format!("{} ", t("footer.jump_session")),
+                    theme::muted(),
+                ));
             }
             Tab::Settings => {
                 spans.push(Span::styled(" ←/→ ", Style::default()));

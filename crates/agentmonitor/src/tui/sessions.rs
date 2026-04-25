@@ -4,9 +4,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
+use crate::adapter::types::SessionStatus;
 use crate::app::App;
 use crate::i18n::t;
-use crate::settings;
+use crate::settings::{self, TokenUnit};
 use crate::tui::{detail, theme};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
@@ -24,17 +25,24 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let state = app.state.read();
     let visible = state.visible_session_indices(&app.session_filter, app.session_sort);
+    let settings = settings::get();
+    let time_pattern = settings.time_format.pattern_short();
+    let include_cache = settings.include_cache_in_total;
+    let token_unit = settings.token_unit;
 
     let items: Vec<ListItem> = visible
         .iter()
         .map(|&i| {
             let s = &state.sessions[i];
-            let time_pattern = settings::get().time_format.pattern_short();
             let when = s
                 .updated_at
                 .map(|t| t.with_timezone(&chrono::Local).format(time_pattern).to_string())
                 .unwrap_or_else(|| "-----".into());
+            let token_total = s.tokens.total_with_preference(include_cache);
+            let token_label = format_token_count(token_total, token_unit);
             let line = Line::from(vec![
+                status_marker(s.status),
+                Span::raw(" "),
                 Span::styled(
                     format!("{:<10} ", s.agent_label()),
                     Style::default()
@@ -46,7 +54,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                     format!("{:<8} ", s.short_id()),
                     Style::default().fg(Color::White),
                 ),
-                Span::raw(shorten(&s.cwd_display(), 30)),
+                Span::styled(
+                    format!("{:>8} ", token_label),
+                    Style::default().fg(theme::SUCCESS),
+                ),
+                Span::raw(shorten(&s.cwd_display(), 22)),
             ]);
             ListItem::new(line)
         })
@@ -136,6 +148,32 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App) {
     ));
     spans.push(Span::styled(t("sessions.sort_hint"), theme::muted()));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn status_marker(status: SessionStatus) -> Span<'static> {
+    match status {
+        SessionStatus::Active => Span::styled("●", theme::status_active()),
+        SessionStatus::Idle => Span::styled("◐", theme::status_idle()),
+        SessionStatus::Completed => Span::styled("○", theme::status_done()),
+        SessionStatus::Unknown => Span::styled("?", theme::status_done()),
+    }
+}
+
+fn format_token_count(n: u64, unit: TokenUnit) -> String {
+    match unit {
+        TokenUnit::Raw => n.to_string(),
+        TokenUnit::Compact => {
+            if n >= 1_000_000_000 {
+                format!("{:.1}B", n as f64 / 1_000_000_000.0)
+            } else if n >= 1_000_000 {
+                format!("{:.1}M", n as f64 / 1_000_000.0)
+            } else if n >= 1_000 {
+                format!("{:.1}K", n as f64 / 1_000.0)
+            } else {
+                n.to_string()
+            }
+        }
+    }
 }
 
 fn shorten(s: &str, max: usize) -> String {

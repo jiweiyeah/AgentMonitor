@@ -11,7 +11,9 @@ use ratatui::Terminal;
 use tokio::sync::Notify;
 
 use crate::adapter::{adapter_for_path, DynAdapter};
-use crate::app::{App, ConversationCache, ExpandMode, Mode, PreviewCache, Tab};
+use crate::app::{
+    toggle_filter_token, App, ConversationCache, ExpandMode, Mode, PreviewCache, Tab,
+};
 use crate::collector::{fs_watch, proc_sampler, token_refresh};
 use crate::settings::TerminalApp;
 use crate::tui::render;
@@ -250,6 +252,9 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
         (KeyCode::Char('3'), _) => app.set_tab(Tab::Settings),
         (KeyCode::Char('j') | KeyCode::Down, _) => move_selection(app, 1),
         (KeyCode::Char('k') | KeyCode::Up, _) => move_selection(app, -1),
+        (KeyCode::Enter, _) if app.tab == Tab::Dashboard => {
+            jump_to_selected_process_session(app);
+        }
         (KeyCode::Right, _) if app.tab == Tab::Settings => {
             cycle_selected_setting(app, true);
         }
@@ -278,6 +283,12 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
         }
         (KeyCode::Char('s'), _) if app.tab == Tab::Sessions => {
             app.session_sort = app.session_sort.cycle();
+            let mut s = app.state.write();
+            s.selected_session = 0;
+            s.dirty = true;
+        }
+        (KeyCode::Char('a'), _) if app.tab == Tab::Sessions => {
+            toggle_filter_token(&mut app.session_filter, "status:active");
             let mut s = app.state.write();
             s.selected_session = 0;
             s.dirty = true;
@@ -389,6 +400,34 @@ fn move_selection(app: &mut App, delta: i32) {
             app.state.write().dirty = true;
         }
     }
+}
+
+fn jump_to_selected_process_session(app: &mut App) {
+    let processes = app.metrics.snapshot();
+    let Some(process) = processes.get(app.selected_process).cloned() else {
+        return;
+    };
+
+    let path = {
+        let state = app.state.read();
+        let Some(session_idx) = state.best_session_index_for_process(&process) else {
+            return;
+        };
+        state.sessions[session_idx].path.clone()
+    };
+
+    app.tab = Tab::Sessions;
+    app.session_filter.clear();
+    app.session_filter_input = false;
+
+    {
+        let mut state = app.state.write();
+        if let Some(row) = state.visible_row_for_path("", app.session_sort, &path) {
+            state.selected_session = row;
+            state.dirty = true;
+        }
+    }
+    maybe_load_preview(app);
 }
 
 fn clamp_step(cur: usize, delta: i32, len: usize) -> usize {

@@ -48,24 +48,33 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 
 | 按键 | 动作 |
 | --- | --- |
-| `1` / `2` / `3` | 切换 Dashboard / Sessions / Process 三个 tab |
+| `1` / `2` / `3` | 切换 Dashboard / Sessions / Settings 三个 tab |
 | `Tab` / `→` | 下一个 tab |
 | `Shift+Tab` / `←` | 上一个 tab |
-| `j` / `↓` | 向下选择（Sessions / Process 当前 tab 的列表） |
+| `j` / `↓` | 向下选择（Dashboard 中为进程表；Sessions / Settings 中为当前列表） |
 | `k` / `↑` | 向上选择 |
-| `Enter` | Sessions tab:打开对话查看器；Process tab:跳转到该进程对应的 session |
-| `r` | 强制重扫会话 |
+| `Enter` | Dashboard: 跳到选中进程对应的 session；Sessions: 打开对话查看器；Settings: 切换当前设置 |
+| `f` | 强制重扫会话 |
 | `q` / `Esc` / `Ctrl+C` | 退出 |
 
 ### Sessions tab 专用
 
 | 按键 | 动作 |
 | --- | --- |
-| `/` | 进入过滤输入（按 cwd / session id / branch / agent 名子串匹配，不区分大小写） |
-| `s` | 循环切换排序（updated↓ → size↓ → msgs↓） |
+| `/` | 进入过滤输入（支持普通子串，也支持 `agent:codex status:active cwd:foo branch:main model:gpt` 这种结构化条件） |
+| `a` | 一键切换 `status:active` 过滤 |
+| `s` | 循环切换排序（updated↓ → tokens↓ → size↓ → msgs↓ → status↓） |
 | `c` | 清除当前过滤 |
+| `r` | 在新终端中恢复当前选中的 session |
 
 过滤输入模式内:`Enter` 应用并退出输入,`Esc` 取消并清空,`Backspace` 删最后一个字符,其他字符追加。
+
+### Dashboard 专用
+
+| 按键 | 动作 |
+| --- | --- |
+| `j` / `k` | 在嵌入的 Live Processes 表中移动选中行 |
+| `Enter` | 跳到该进程最可能对应的 session（同 agent，优先同 cwd 和最近活跃） |
 
 ### 对话查看器（Viewer 模式）
 
@@ -78,6 +87,7 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 | `PgDn` / `PgUp` | 整屏翻页 |
 | `g` / `G` | 跳到顶 / 底 |
 | `e` / `c` | 全部展开 / 全部折叠（thinking、tool_use、tool_result、attachment 默认折叠） |
+| `r` | 在新终端中恢复当前查看的 session |
 | `Ctrl+C` | 退出程序 |
 
 查看器按 mtime 缓存已解析的会话,并只把 visible 行交给 ratatui 渲染,1MB+ 会话也能常量时间滚动。
