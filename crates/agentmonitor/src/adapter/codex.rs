@@ -41,6 +41,20 @@ impl CodexAdapter {
     }
 }
 
+fn is_codex_cli_process_arg(arg: &str) -> bool {
+    arg.ends_with("/bin/codex")
+        || arg == "codex"
+        || arg.contains("/@openai/codex-")
+        || arg.contains("/codex-cli/")
+}
+
+fn is_codex_desktop_process(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.ends_with("/Codex.app/Contents/MacOS/Codex")
+        || path.ends_with("/Codex.app/Contents/Resources/codex")
+        || path.ends_with("/Codex.app/Contents/Resources/node_repl")
+}
+
 #[async_trait]
 impl AgentAdapter for CodexAdapter {
     fn id(&self) -> &'static str {
@@ -58,13 +72,11 @@ impl AgentAdapter for CodexAdapter {
             .map(|n| n.starts_with("rollout-") && n.ends_with(".jsonl"))
             .unwrap_or(false)
     }
-    fn matches_process(&self, cmd: &[String], _exe: Option<&Path>) -> bool {
-        cmd.iter().any(|s| {
-            s.ends_with("/bin/codex")
-                || s == "codex"
-                || s.contains("/@openai/codex-")
-                || s.contains("/codex-cli/")
-        })
+    fn matches_process(&self, cmd: &[String], exe: Option<&Path>) -> bool {
+        exe.is_some_and(is_codex_desktop_process)
+            || cmd.iter().any(|arg| {
+                is_codex_cli_process_arg(arg) || is_codex_desktop_process(Path::new(arg))
+            })
     }
 
     async fn parse_meta_fast(&self, path: &Path) -> Result<SessionMeta> {
@@ -758,5 +770,61 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         assert_eq!(meta.updated_at, Some(expected));
+    }
+
+    #[test]
+    fn matches_codex_cli_processes() {
+        let adapter = CodexAdapter::new(None);
+        let cmd = vec!["/Users/test/.npm/_npx/123/bin/codex".to_string()];
+
+        assert!(adapter.matches_process(&cmd, None));
+    }
+
+    #[test]
+    fn matches_codex_desktop_main_process() {
+        let adapter = CodexAdapter::new(None);
+        let cmd = vec!["/Applications/Codex.app/Contents/MacOS/Codex".to_string()];
+
+        assert!(adapter.matches_process(&cmd, None));
+    }
+
+    #[test]
+    fn matches_codex_desktop_main_process_from_exe_path() {
+        let adapter = CodexAdapter::new(None);
+        let exe = Path::new("/Applications/Codex.app/Contents/MacOS/Codex");
+
+        assert!(adapter.matches_process(&[], Some(exe)));
+    }
+
+    #[test]
+    fn matches_codex_desktop_app_server_process() {
+        let adapter = CodexAdapter::new(None);
+        let cmd = vec![
+            "/Applications/Codex.app/Contents/Resources/codex".to_string(),
+            "app-server".to_string(),
+            "--analytics-default-enabled".to_string(),
+        ];
+
+        assert!(adapter.matches_process(&cmd, None));
+    }
+
+    #[test]
+    fn matches_codex_desktop_node_repl_process() {
+        let adapter = CodexAdapter::new(None);
+        let cmd = vec!["/Applications/Codex.app/Contents/Resources/node_repl".to_string()];
+
+        assert!(adapter.matches_process(&cmd, None));
+    }
+
+    #[test]
+    fn does_not_match_vscode_extension_app_server_process() {
+        let adapter = CodexAdapter::new(None);
+        let cmd = vec![
+            "/Users/test/.vscode/extensions/openai.chatgpt-26.422.30944-darwin-arm64/bin/macos-aarch64/codex".to_string(),
+            "app-server".to_string(),
+            "--analytics-default-enabled".to_string(),
+        ];
+
+        assert!(!adapter.matches_process(&cmd, None));
     }
 }
