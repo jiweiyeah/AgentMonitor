@@ -95,11 +95,7 @@ pub async fn run(
 /// Returns `true` if the event actually mutated `AppState.sessions`. The
 /// caller uses this to decide whether a token refresh is worth kicking off
 /// (pure noise events like metadata-only access shouldn't spin the refresher).
-async fn handle_event(
-    ev: Event,
-    adapters: &[DynAdapter],
-    state: &Arc<RwLock<AppState>>,
-) -> bool {
+async fn handle_event(ev: Event, adapters: &[DynAdapter], state: &Arc<RwLock<AppState>>) -> bool {
     match ev.kind {
         EventKind::Create(_) | EventKind::Modify(_) => {
             let mut any = false;
@@ -205,7 +201,10 @@ async fn update_for_path(
 /// Projects `latest` jumping to the *second-newest* session's timestamp
 /// every ~10s. File removal is handled authoritatively via fs_watch's
 /// `EventKind::Remove` branch; reconcile only adds/updates, never deletes.
-pub(crate) fn replace_preserving_tokens(state: &Arc<RwLock<AppState>>, mut fresh: Vec<SessionMeta>) {
+pub(crate) fn replace_preserving_tokens(
+    state: &Arc<RwLock<AppState>>,
+    mut fresh: Vec<SessionMeta>,
+) {
     // Normalize on the way in so every stored SessionMeta uses the
     // `/Users/...` form even if something (e.g. a symlinked config dir) fed
     // us a `/System/Volumes/Data/...` path.
@@ -215,11 +214,8 @@ pub(crate) fn replace_preserving_tokens(state: &Arc<RwLock<AppState>>, mut fresh
     let mut s = state.write();
     // Drain prev into a by-path map so we can (a) look up tokens to
     // preserve, and (b) harvest the sessions that fresh didn't report.
-    let mut prev: HashMap<PathBuf, SessionMeta> = s
-        .sessions
-        .drain(..)
-        .map(|m| (m.path.clone(), m))
-        .collect();
+    let mut prev: HashMap<PathBuf, SessionMeta> =
+        s.sessions.drain(..).map(|m| (m.path.clone(), m)).collect();
 
     let mut merged: Vec<SessionMeta> = Vec::with_capacity(prev.len().max(fresh.len()));
     let mut preserved = 0usize;
@@ -374,7 +370,10 @@ mod tests {
         replace_preserving_tokens(&state, fresh);
 
         let s = state.read();
-        assert_eq!(s.sessions[0].tokens.input, 0, "fast-parse tokens must be dropped");
+        assert_eq!(
+            s.sessions[0].tokens.input, 0,
+            "fast-parse tokens must be dropped"
+        );
         assert_eq!(s.sessions[0].message_count, 0);
     }
 
@@ -422,10 +421,20 @@ mod tests {
             .map(|m| m.path.display().to_string())
             .collect();
         assert!(paths.contains(&"/a".to_string()));
-        assert!(paths.contains(&"/b".to_string()), "missing-from-fresh session must be carried forward");
+        assert!(
+            paths.contains(&"/b".to_string()),
+            "missing-from-fresh session must be carried forward"
+        );
         assert!(paths.contains(&"/c".to_string()));
-        let b = s.sessions.iter().find(|m| m.path == Path::new("/b")).unwrap();
-        assert_eq!(b.tokens.input, 2_000, "carried-forward session keeps its prior tokens");
+        let b = s
+            .sessions
+            .iter()
+            .find(|m| m.path == Path::new("/b"))
+            .unwrap();
+        assert_eq!(
+            b.tokens.input, 2_000,
+            "carried-forward session keeps its prior tokens"
+        );
         assert_eq!(b.message_count, 20);
     }
 

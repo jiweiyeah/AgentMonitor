@@ -195,7 +195,9 @@ impl AppState {
             }
             SessionSort::SizeDesc => {
                 idxs.sort_by(|&a, &b| {
-                    self.sessions[b].size_bytes.cmp(&self.sessions[a].size_bytes)
+                    self.sessions[b]
+                        .size_bytes
+                        .cmp(&self.sessions[a].size_bytes)
                 });
             }
             SessionSort::MessagesDesc => {
@@ -207,8 +209,7 @@ impl AppState {
             }
             SessionSort::StatusDesc => {
                 idxs.sort_by(|&a, &b| {
-                    status_rank(self.sessions[b].status)
-                        .cmp(&status_rank(self.sessions[a].status))
+                    status_rank(self.sessions[b].status).cmp(&status_rank(self.sessions[a].status))
                 });
             }
         }
@@ -234,7 +235,12 @@ impl AppState {
             .map(|(idx, _)| idx)
     }
 
-    pub fn visible_row_for_path(&self, filter: &str, sort: SessionSort, path: &Path) -> Option<usize> {
+    pub fn visible_row_for_path(
+        &self,
+        filter: &str,
+        sort: SessionSort,
+        path: &Path,
+    ) -> Option<usize> {
         self.visible_session_indices(filter, sort)
             .iter()
             .position(|&idx| self.sessions[idx].path == path)
@@ -543,13 +549,21 @@ mod tests {
             }),
         ]);
         let idxs = state.visible_session_indices("agent", SessionSort::UpdatedDesc);
-        assert_eq!(idxs, vec![0], "filter matches cwd substring case-insensitive");
+        assert_eq!(
+            idxs,
+            vec![0],
+            "filter matches cwd substring case-insensitive"
+        );
 
         let idxs = state.visible_session_indices("XYZ", SessionSort::UpdatedDesc);
         assert_eq!(idxs, vec![1], "filter matches id case-insensitive");
 
         let idxs = state.visible_session_indices("", SessionSort::UpdatedDesc);
-        assert_eq!(idxs, vec![0, 1, 2], "empty filter keeps all, preserves order");
+        assert_eq!(
+            idxs,
+            vec![0, 1, 2],
+            "empty filter keeps all, preserves order"
+        );
     }
 
     #[test]
@@ -651,7 +665,10 @@ mod tests {
         );
         assert_eq!(idxs, vec![1]);
 
-        let idxs = state.visible_session_indices("status:completed cwd:/repos/other", SessionSort::UpdatedDesc);
+        let idxs = state.visible_session_indices(
+            "status:completed cwd:/repos/other",
+            SessionSort::UpdatedDesc,
+        );
         assert_eq!(idxs, vec![2]);
     }
 

@@ -201,11 +201,14 @@ impl Default for TerminalApp {
     fn default() -> Self {
         // Pick the first available terminal, falling back to Terminal on macOS
         // or the first CLI-based option on Linux.
-        Self::detect().first().copied().unwrap_or(if cfg!(target_os = "macos") {
-            TerminalApp::Terminal
-        } else {
-            TerminalApp::Alacritty
-        })
+        Self::detect()
+            .first()
+            .copied()
+            .unwrap_or(if cfg!(target_os = "macos") {
+                TerminalApp::Terminal
+            } else {
+                TerminalApp::Alacritty
+            })
     }
 }
 
@@ -239,13 +242,15 @@ impl TerminalApp {
     /// terminals does not change during a TUI session.
     pub fn detect() -> Vec<TerminalApp> {
         static CACHE: std::sync::OnceLock<Vec<TerminalApp>> = std::sync::OnceLock::new();
-        CACHE.get_or_init(|| {
-            Self::all()
-                .iter()
-                .filter(|t| t.is_available())
-                .copied()
-                .collect()
-        }).clone()
+        CACHE
+            .get_or_init(|| {
+                Self::all()
+                    .iter()
+                    .filter(|t| t.is_available())
+                    .copied()
+                    .collect()
+            })
+            .clone()
     }
 
     /// Check whether this terminal is installed / accessible.
@@ -273,10 +278,7 @@ impl TerminalApp {
         if available.len() <= 1 {
             return self;
         }
-        let idx = available
-            .iter()
-            .position(|&t| t == self)
-            .unwrap_or(0);
+        let idx = available.iter().position(|&t| t == self).unwrap_or(0);
         available[(idx + 1) % available.len()]
     }
 
@@ -286,18 +288,14 @@ impl TerminalApp {
         if available.len() <= 1 {
             return self;
         }
-        let idx = available
-            .iter()
-            .position(|&t| t == self)
-            .unwrap_or(0);
+        let idx = available.iter().position(|&t| t == self).unwrap_or(0);
         available[(idx + available.len() - 1) % available.len()]
     }
 }
 
 /// Resolve `~/Applications/` for macOS .app detection.
 fn home_applications() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
-        .join("Applications")
+    PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())).join("Applications")
 }
 
 /// Check whether an executable exists on `$PATH` via in-process lookup.
@@ -305,10 +303,7 @@ fn home_applications() -> PathBuf {
 /// binary.
 pub(crate) fn which_exists(name: &str) -> bool {
     std::env::var("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths)
-                .any(|dir| dir.join(name).exists())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).exists()))
         .unwrap_or(false)
 }
 

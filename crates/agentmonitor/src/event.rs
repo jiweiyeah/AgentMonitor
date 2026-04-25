@@ -69,7 +69,14 @@ pub async fn run_event_loop(
     let dirty_tok = dirty.clone();
     let token_dirty_tok = token_dirty.clone();
     tokio::spawn(async move {
-        token_refresh::run(adapters_tok, state_tok, cache_tok, token_dirty_tok, dirty_tok).await;
+        token_refresh::run(
+            adapters_tok,
+            state_tok,
+            cache_tok,
+            token_dirty_tok,
+            dirty_tok,
+        )
+        .await;
     });
 
     let mut events = EventStream::new();
@@ -137,8 +144,9 @@ fn maybe_load_preview(app: &App) {
     let state = app.state.clone();
     let adapters: Vec<DynAdapter> = app.adapters.clone();
     tokio::spawn(async move {
-        let adapter = adapters.iter().find(|a| a.owns_path(&path));
-        let Some(adapter) = adapter else { return };
+        let Some(adapter) = adapter_for_path(&adapters, &path).cloned() else {
+            return;
+        };
         let (messages, count) = tokio::join!(
             adapter.tail_messages(&path, 5),
             adapter.parse_meta_full(&path),
@@ -740,20 +748,23 @@ fn open_cli_terminal(terminal: TerminalApp, cwd: Option<&Path>, cmd: &str) -> an
         TerminalApp::Warp => ("warp", vec![&shell, "-c", &full_cmd]),
         _ => anyhow::bail!("unsupported terminal: {:?}", terminal),
     };
-    std::process::Command::new(program)
-        .args(&args)
-        .spawn()?;
+    std::process::Command::new(program).args(&args).spawn()?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapter::types::{MessageRole, SessionMeta, SessionStatus, TokenStats};
+    use crate::adapter::{ClaudeAdapter, CodexAdapter};
     use crate::app::{AppState, SessionSort};
     use crate::collector::metrics::MetricsStore;
     use crate::collector::token_refresh::TokenCache;
     use crate::config::Config;
     use parking_lot::RwLock;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn test_app() -> App {
         App {
@@ -794,5 +805,113 @@ mod tests {
 
         assert!(should_exit);
         assert!(app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn preview_loader_uses_codex_adapter_for_codex_sessions() {
+        let unique = format!(
+            "agentmonitor-preview-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time went backwards")
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        let claude_root = base.join(".claude").join("projects");
+        let codex_root = base.join(".codex").join("sessions");
+        let session_path = codex_root
+            .join("2026")
+            .join("04")
+            .join("25")
+            .join("rollout-2026-04-25T16-21-21-019dc3ba-a222-7631-96e6-2e1ebb238e53.jsonl");
+        std::fs::create_dir_all(&claude_root).expect("create claude root");
+        std::fs::create_dir_all(session_path.parent().expect("session dir"))
+            .expect("create codex session dir");
+        std::fs::write(
+            &session_path,
+            concat!(
+                r#"{"timestamp":"2026-04-25T08:21:38.973Z","type":"session_meta","payload":{"id":"019dc3ba-a222-7631-96e6-2e1ebb238e53","timestamp":"2026-04-25T08:21:21.574Z","cwd":"/tmp/repo","originator":"Codex Desktop","cli_version":"0.125.0-alpha.3","model_provider":"openai"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-25T08:21:56.528Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello from user"}]}}"#,
+                "\n",
+                r#"{"timestamp":"2026-04-25T08:22:07.734Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello from assistant"}]}}"#,
+                "\n"
+            ),
+        )
+        .expect("write codex session");
+
+        let app = App {
+            config: Config {
+                claude_root: Some(claude_root.clone()),
+                codex_root: Some(codex_root.clone()),
+                ..Config::default()
+            },
+            state: Arc::new(RwLock::new(AppState {
+                sessions: vec![SessionMeta {
+                    agent: "codex",
+                    id: "019dc3ba-a222-7631-96e6-2e1ebb238e53".into(),
+                    path: session_path.clone(),
+                    cwd: Some(PathBuf::from("/tmp/repo")),
+                    model: Some("openai".into()),
+                    version: Some("0.125.0-alpha.3".into()),
+                    git_branch: None,
+                    started_at: None,
+                    updated_at: None,
+                    message_count: 0,
+                    tokens: TokenStats::default(),
+                    status: SessionStatus::Idle,
+                    byte_offset: 0,
+                    size_bytes: 0,
+                }],
+                selected_session: 0,
+                dirty: false,
+                preview: None,
+                mode: Mode::Normal,
+                conversation: None,
+            })),
+            metrics: Arc::new(MetricsStore::new(8)),
+            adapters: vec![
+                Arc::new(ClaudeAdapter::new(Some(claude_root))),
+                Arc::new(CodexAdapter::new(Some(codex_root))),
+            ],
+            tab: Tab::Sessions,
+            should_quit: false,
+            session_filter: String::new(),
+            session_filter_input: false,
+            session_sort: SessionSort::default(),
+            selected_process: 0,
+            selected_setting: 0,
+            token_cache: Arc::new(TokenCache::new()),
+        };
+
+        maybe_load_preview(&app);
+
+        let mut loaded = None;
+        for _ in 0..50 {
+            {
+                let s = app.state.read();
+                if let Some(cache) = &s.preview {
+                    if !cache.loading {
+                        loaded = Some(cache.clone());
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let preview = loaded.expect("preview should finish loading");
+        assert_eq!(
+            preview.messages.len(),
+            2,
+            "preview should show codex messages"
+        );
+        assert!(matches!(preview.messages[0].role, MessageRole::User));
+        assert_eq!(preview.messages[0].text, "hello from user");
+        assert!(matches!(preview.messages[1].role, MessageRole::Assistant));
+        assert_eq!(preview.messages[1].text, "hello from assistant");
+
+        let _ = std::fs::remove_dir_all(base);
     }
 }

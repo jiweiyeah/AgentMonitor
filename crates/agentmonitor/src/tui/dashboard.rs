@@ -126,7 +126,10 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
 
     let lines = vec![
         Line::from(vec![
-            Span::styled(pad_display_width(t("dashboard.sessions"), 10), theme::muted()),
+            Span::styled(
+                pad_display_width(t("dashboard.sessions"), 10),
+                theme::muted(),
+            ),
             bold(format!("{}", d.total_sessions)),
             Span::styled(
                 format!("   {}", pad_display_width(t("dashboard.last24h"), 10)),
@@ -138,7 +141,10 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
                     .fg(theme::SUCCESS)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("   {}  ", t("dashboard.total_tokens")), theme::muted()),
+            Span::styled(
+                format!("   {}  ", t("dashboard.total_tokens")),
+                theme::muted(),
+            ),
             Span::styled(
                 format_token_count(d.total_tokens),
                 Style::default()
@@ -169,7 +175,10 @@ fn process_row_spans(d: &OverviewData<'_>) -> Vec<Span<'static>> {
         .fg(theme::accent())
         .add_modifier(Modifier::BOLD);
     vec![
-        Span::styled(pad_display_width(t("dashboard.process"), 10), theme::muted()),
+        Span::styled(
+            pad_display_width(t("dashboard.process"), 10),
+            theme::muted(),
+        ),
         bold(format!("{} {}", d.live_pids, t("dashboard.live"))),
         Span::styled(" · ", theme::muted()),
         Span::styled(human_bytes(d.total_rss_kb), accent_bold),
@@ -398,12 +407,12 @@ fn render_top_projects(
 fn render_tokens_by_agent(frame: &mut Frame, area: Rect, rows: &[AgentTokenRow]) {
     let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 1);
     lines.push(Line::from(vec![
+        Span::styled(format!("{:<12} {:>4}  ", "Agent", "Ses"), theme::muted()),
         Span::styled(
-            format!("{:<12} {:>4}  ", "Agent", "Ses"),
-            theme::muted(),
-        ),
-        Span::styled(
-            format!("{:>9}  {:>9}  {:>9}  {:>9}  {:>9}", "input", "output", "cache_r", "cache_w", "Σ"),
+            format!(
+                "{:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
+                "input", "output", "cache_r", "cache_w", "Σ"
+            ),
             theme::muted(),
         ),
     ]));
@@ -416,7 +425,10 @@ fn render_tokens_by_agent(frame: &mut Frame, area: Rect, rows: &[AgentTokenRow])
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("{:>4}  ", r.sessions), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{:>4}  ", r.sessions),
+                Style::default().fg(Color::White),
+            ),
             Span::raw(format!(
                 "{:>9}  {:>9}  {:>9}  {:>9}  ",
                 format_token_count(tok.input),
@@ -425,7 +437,12 @@ fn render_tokens_by_agent(frame: &mut Frame, area: Rect, rows: &[AgentTokenRow])
                 format_token_count(tok.cache_creation),
             )),
             Span::styled(
-                format!("{:>9}", format_token_count(tok.total_with_preference(settings::get().include_cache_in_total))),
+                format!(
+                    "{:>9}",
+                    format_token_count(
+                        tok.total_with_preference(settings::get().include_cache_in_total)
+                    )
+                ),
                 Style::default()
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),

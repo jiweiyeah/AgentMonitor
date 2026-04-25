@@ -260,7 +260,10 @@ fn render_footer(frame: &mut Frame, area: Rect, cache: Option<&ConversationCache
         Span::styled(" r ", Style::default()),
         Span::styled(format!("{} ", t("footer.resume")), theme::muted()),
         Span::styled(
-            format!(" [{expand_label} · {total} {} · row {scroll}] ", t("viewer.events")),
+            format!(
+                " [{expand_label} · {total} {} · row {scroll}] ",
+                t("viewer.events")
+            ),
             theme::muted(),
         ),
     ]));
@@ -299,7 +302,11 @@ fn event_header(ev: &ConversationEvent) -> Line<'static> {
     };
     let when = ev
         .ts
-        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_default();
     Line::from(vec![
         Span::styled(format!("┌─[{}] ", ev.role.label()), role_style),

@@ -429,7 +429,7 @@ fn is_native_first_type(t: Option<&str>) -> bool {
     // live alongside real session files under `~/.claude/projects/`. Every
     // other first-line type is treated as a valid session.
     match t {
-        None => false, // empty file — nothing to parse
+        None => false,                    // empty file — nothing to parse
         Some("queue-operation") => false, // claude-mem observer queue
         Some(_) => true,
     }
@@ -736,7 +736,12 @@ mod tests {
         // sessions before — 92 of the user's files started with
         // permission-mode and were silently dropped, causing the Dashboard
         // to appear frozen at an old token total).
-        for ty in ["permission-mode", "attachment", "progress", "worktree-state"] {
+        for ty in [
+            "permission-mode",
+            "attachment",
+            "progress",
+            "worktree-state",
+        ] {
             assert!(
                 is_native_first_type(Some(ty)),
                 "{ty} is a legit Claude Code opener in newer CLI versions"

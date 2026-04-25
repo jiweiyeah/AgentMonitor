@@ -173,7 +173,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
 
     let mut list_state = ListState::default();
-    list_state.select(Some(app.selected_setting.min(SettingsItem::all().len() - 1)));
+    list_state.select(Some(
+        app.selected_setting.min(SettingsItem::all().len() - 1),
+    ));
 
     let list = List::new(items)
         .block(

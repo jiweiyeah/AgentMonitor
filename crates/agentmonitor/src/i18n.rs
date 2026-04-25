@@ -72,7 +72,9 @@ fn t_en(key: &str) -> &'static str {
         "sessions.recent_messages" => " Recent messages ",
         "sessions.recent_messages_loading" => " Recent messages (loading) ",
         "sessions.filter_label" => "Filter ",
-        "sessions.filter_hint" => "(press /, or `a` for active-only; try `agent:codex status:active`)",
+        "sessions.filter_hint" => {
+            "(press /, or `a` for active-only; try `agent:codex status:active`)"
+        }
         "sessions.filter_clear_hint" => " (c to clear)",
         "sessions.filter_edit_hint" => "  Esc cancel · Enter apply · Backspace delete",
         "sessions.sort_label" => "    Sort ",
@@ -81,7 +83,9 @@ fn t_en(key: &str) -> &'static str {
         "sessions.empty_filtered" => "No sessions match the current filter.",
         "sessions.preview_select" => "Select a session to preview.",
         "sessions.preview_loading" => "Loading…",
-        "sessions.preview_no_messages" => "No user/assistant messages found in the tail of this file.",
+        "sessions.preview_no_messages" => {
+            "No user/assistant messages found in the tail of this file."
+        }
 
         // ── Detail fields ───────────────────────────────
         "detail.agent" => "Agent    ",
@@ -184,7 +188,9 @@ fn t_zh(key: &str) -> Option<&'static str> {
         "sessions.recent_messages" => " 最近消息 ",
         "sessions.recent_messages_loading" => " 最近消息 (加载中) ",
         "sessions.filter_label" => "过滤 ",
-        "sessions.filter_hint" => "(按 / 过滤，或按 `a` 只看活跃，例如 `agent:codex status:active`)",
+        "sessions.filter_hint" => {
+            "(按 / 过滤，或按 `a` 只看活跃，例如 `agent:codex status:active`)"
+        }
         "sessions.filter_clear_hint" => " (c 清空)",
         "sessions.filter_edit_hint" => "  Esc 取消 · Enter 应用 · Backspace 删除",
         "sessions.sort_label" => "    排序 ",

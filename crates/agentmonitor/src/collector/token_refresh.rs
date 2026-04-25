@@ -137,9 +137,7 @@ async fn refresh_all(
         .collect();
 
     stream::iter(paths)
-        .map(|path| async move {
-            usize::from(refresh_one(adapters, state, cache, &path).await)
-        })
+        .map(|path| async move { usize::from(refresh_one(adapters, state, cache, &path).await) })
         .buffer_unordered(CONCURRENCY)
         .fold(0usize, |acc, n| async move { acc + n })
         .await

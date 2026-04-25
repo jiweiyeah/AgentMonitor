@@ -36,7 +36,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             let s = &state.sessions[i];
             let when = s
                 .updated_at
-                .map(|t| t.with_timezone(&chrono::Local).format(time_pattern).to_string())
+                .map(|t| {
+                    t.with_timezone(&chrono::Local)
+                        .format(time_pattern)
+                        .to_string()
+                })
                 .unwrap_or_else(|| "-----".into());
             let token_total = s.tokens.total_with_preference(include_cache);
             let token_label = format_token_count(token_total, token_unit);
@@ -73,7 +77,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let mut list_state = ListState::default();
     list_state.select(selected_row);
 
-    let title = format!("{}({}/{}) ", t("sessions.title"), visible.len(), state.sessions.len());
+    let title = format!(
+        "{}({}/{}) ",
+        t("sessions.title"),
+        visible.len(),
+        state.sessions.len()
+    );
     let list = List::new(items)
         .block(
             Block::default()
@@ -121,15 +130,9 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App) {
                 .bg(theme::accent())
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(
-            t("sessions.filter_edit_hint"),
-            theme::muted(),
-        ));
+        spans.push(Span::styled(t("sessions.filter_edit_hint"), theme::muted()));
     } else if app.session_filter.is_empty() {
-        spans.push(Span::styled(
-            t("sessions.filter_hint"),
-            theme::muted(),
-        ));
+        spans.push(Span::styled(t("sessions.filter_hint"), theme::muted()));
     } else {
         spans.push(Span::styled(
             format!("`{}`", app.session_filter),
@@ -137,7 +140,10 @@ fn render_filter_bar(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(theme::accent())
                 .add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(t("sessions.filter_clear_hint"), theme::muted()));
+        spans.push(Span::styled(
+            t("sessions.filter_clear_hint"),
+            theme::muted(),
+        ));
     }
     spans.push(Span::styled(t("sessions.sort_label"), theme::muted()));
     spans.push(Span::styled(

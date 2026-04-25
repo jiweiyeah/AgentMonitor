@@ -116,7 +116,10 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: Option<&PreviewCache>)
             t("sessions.recent_messages").to_string(),
         ),
         Some(p) if p.loading => (
-            vec![Line::from(Span::styled(t("sessions.preview_loading"), theme::muted()))],
+            vec![Line::from(Span::styled(
+                t("sessions.preview_loading"),
+                theme::muted(),
+            ))],
             t("sessions.recent_messages_loading").to_string(),
         ),
         Some(p) if p.messages.is_empty() => (
@@ -132,7 +135,10 @@ fn render_preview(frame: &mut Frame, area: Rect, preview: Option<&PreviewCache>)
                 lines.extend(message_to_lines(m));
                 lines.push(Line::from(""));
             }
-            (lines, format!("{}({}) ", t("sessions.recent_messages"), p.messages.len()))
+            (
+                lines,
+                format!("{}({}) ", t("sessions.recent_messages"), p.messages.len()),
+            )
         }
     };
     let para = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
@@ -156,8 +162,12 @@ fn message_to_lines(m: &MessagePreview) -> Vec<Line<'static>> {
     };
     let short_pat = settings::get().time_format.pattern_short();
     let when =
-        m.ts.map(|t| t.with_timezone(&chrono::Local).format(short_pat).to_string())
-            .unwrap_or_else(|| "".into());
+        m.ts.map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format(short_pat)
+                .to_string()
+        })
+        .unwrap_or_else(|| "".into());
     let header = Line::from(vec![
         Span::styled(format!("[{}] ", m.role.label()), role_style),
         Span::styled(when, theme::muted()),

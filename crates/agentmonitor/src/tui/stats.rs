@@ -125,8 +125,7 @@ pub fn aggregate_rss_buckets(
     let oldest_bucket = newest_bucket.saturating_sub(n_buckets as u64 - 1);
 
     // per_bucket[pid] -> rss_kb of the latest sample in that bucket.
-    let mut per_bucket: Vec<HashMap<u32, u64>> =
-        (0..n_buckets).map(|_| HashMap::new()).collect();
+    let mut per_bucket: Vec<HashMap<u32, u64>> = (0..n_buckets).map(|_| HashMap::new()).collect();
 
     for entry in store.snapshot() {
         for sample in entry.samples.iter() {
@@ -138,10 +137,7 @@ pub fn aggregate_rss_buckets(
             per_bucket[idx].insert(entry.pid, sample.rss_kb);
         }
     }
-    per_bucket
-        .into_iter()
-        .map(|m| m.values().sum())
-        .collect()
+    per_bucket.into_iter().map(|m| m.values().sum()).collect()
 }
 
 #[cfg(test)]
@@ -151,7 +147,11 @@ mod tests {
 
     use chrono::TimeZone;
 
-    fn session(agent: &'static str, cwd: Option<&str>, updated: Option<DateTime<Utc>>) -> SessionMeta {
+    fn session(
+        agent: &'static str,
+        cwd: Option<&str>,
+        updated: Option<DateTime<Utc>>,
+    ) -> SessionMeta {
         SessionMeta {
             agent,
             id: "x".into(),
@@ -189,9 +189,16 @@ mod tests {
     #[test]
     fn activity_buckets_handles_future_timestamps() {
         let now = Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap();
-        let s = vec![session("claude", None, Some(now + chrono::Duration::minutes(5)))];
+        let s = vec![session(
+            "claude",
+            None,
+            Some(now + chrono::Duration::minutes(5)),
+        )];
         let b = activity_buckets(&s, now, 24);
-        assert_eq!(b[23], 1, "future-skewed timestamps land in the current bucket");
+        assert_eq!(
+            b[23], 1,
+            "future-skewed timestamps land in the current bucket"
+        );
     }
 
     #[test]
