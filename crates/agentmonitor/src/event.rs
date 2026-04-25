@@ -235,13 +235,13 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
 
 fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {
     // Sessions-tab filter input swallows printable keys, Backspace, Esc and
-    // Enter so they don't trigger normal-mode actions like quit / open viewer.
+    // Enter so they don't trigger normal-mode actions while the user is typing.
     if app.session_filter_input && app.tab == Tab::Sessions {
         handle_session_filter_input(code, app);
         return false;
     }
     match (code, modifiers) {
-        (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => {
+        (KeyCode::Char('q'), _) => {
             app.should_quit = true;
             return true;
         }
@@ -744,4 +744,55 @@ fn open_cli_terminal(terminal: TerminalApp, cwd: Option<&Path>, cmd: &str) -> an
         .args(&args)
         .spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{AppState, SessionSort};
+    use crate::collector::metrics::MetricsStore;
+    use crate::collector::token_refresh::TokenCache;
+    use crate::config::Config;
+    use parking_lot::RwLock;
+
+    fn test_app() -> App {
+        App {
+            config: Config {
+                claude_root: None,
+                codex_root: None,
+                ..Config::default()
+            },
+            state: Arc::new(RwLock::new(AppState::default())),
+            metrics: Arc::new(MetricsStore::new(8)),
+            adapters: Vec::new(),
+            tab: Tab::Dashboard,
+            should_quit: false,
+            session_filter: String::new(),
+            session_filter_input: false,
+            session_sort: SessionSort::default(),
+            selected_process: 0,
+            selected_setting: 0,
+            token_cache: Arc::new(TokenCache::new()),
+        }
+    }
+
+    #[test]
+    fn esc_does_not_quit_in_normal_mode() {
+        let mut app = test_app();
+
+        let should_exit = handle_normal(KeyCode::Esc, KeyModifiers::empty(), &mut app);
+
+        assert!(!should_exit);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn q_quits_in_normal_mode() {
+        let mut app = test_app();
+
+        let should_exit = handle_normal(KeyCode::Char('q'), KeyModifiers::empty(), &mut app);
+
+        assert!(should_exit);
+        assert!(app.should_quit);
+    }
 }

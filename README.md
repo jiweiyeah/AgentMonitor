@@ -55,7 +55,7 @@ cargo run -p agentmonitor --release -- --sample-interval 1 --debug
 | `k` / `↑` | 向上选择 |
 | `Enter` | Dashboard: 跳到选中进程对应的 session；Sessions: 打开对话查看器；Settings: 切换当前设置 |
 | `f` | 强制重扫会话 |
-| `q` / `Esc` / `Ctrl+C` | 退出 |
+| `q` / `Ctrl+C` | 退出 |
 
 ### Sessions tab 专用
 
