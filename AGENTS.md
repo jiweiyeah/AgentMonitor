@@ -1,0 +1,221 @@
+# AGENTS.md
+
+Notes for future agents / contributors working on agent-monitor. Focused on
+non-obvious invariants and the bugs we've already paid for once.
+
+## Architecture at a glance
+
+```
+crates/agentmonitor/src/
+  adapter/         per-agent session parsing
+    Codex.rs      Codex JSONL schema
+    codex.rs       Codex rollout-*.jsonl schema
+  collector/       background data sources
+    fs_watch.rs    notify-backed file watcher + 10s reconcile fallback
+    proc_sampler.rs ps-style process sampling
+    token_refresh.rs full-parse token computation + (path, mtime) cache
+  tui/             ratatui renderers (dashboard/sessions/process/viewer)
+  app.rs           AppState (RwLock-guarded), App, SessionSort
+  event.rs         event loop + key dispatch + Notify plumbing
+```
+
+Three background tasks feed `AppState` through `Arc<Notify>` signals:
+
+- `proc_sampler` writes `MetricsStore`, notifies `dirty` → render.
+- `fs_watch` writes `AppState.sessions` **metadata only** (id / cwd / mtime /
+  size / status / model), notifies `dirty` and `token_dirty`.
+- `token_refresh` writes `AppState.sessions` **tokens + message_count**,
+  notifies `dirty`. Triggered by `token_dirty` (event-driven) plus a 5s
+  safety-net ticker.
+
+## Hard-won invariants
+
+### 1. fast-parse results MUST NOT touch `tokens` or `message_count`
+
+`parse_meta_fast` reads at most ~8 header lines. For Codex that's usually
+`permission-mode` + `attachment` rows, *before* any assistant message with
+a `usage` field — so fast-parse always returns ~0 tokens. For Codex it's
+the single `session_meta` row, also 0 tokens. These values **are not the
+truth**; they're a header subtotal.
+
+`collector::token_refresh` is the **sole writer** for `tokens` /
+`message_count`. `fs_watch::update_for_path` and
+`fs_watch::replace_preserving_tokens` explicitly preserve whatever the
+previous state held for a given path; `App::initial_scan` zeroes tokens on
+fresh scan. If you ever feel tempted to merge fast-parse tokens into state
+"just in case", remember the symptom is the Dashboard flashing back to a
+header-sized fraction of the real total every 10s.
+
+### 2. Tokens are monotone-nondecreasing per session
+
+Codex/Codex JSONL is append-only. `token_refresh::write_back` rejects any
+new total smaller than the existing one (when existing > 0). This protects
+against transient partial reads when `parse_meta_full` races an active
+writer and reaches EOF prematurely. Next pass catches up.
+
+The one case this silently drops real data is `/compact`, which can
+rewrite a session with a summary. Accept that trade; the alternative is
+visible Dashboard flicker on every active-session write.
+
+### 3. Cache `(path, mtime)` keys use **post-parse** mtime
+
+`parse_meta_full` on a multi-MB file takes hundreds of ms. If the file is
+being appended during the read, the pre-parse mtime is already stale by
+the time parsing finishes. Keying the cache on pre-parse mtime means the
+next fs_watch lookup uses a newer mtime and misses — causing needless
+re-parses and, combined with the firmlink bug below, user-visible
+oscillation. Stat again after `parse_meta_full` returns and use that.
+
+### 4. macOS firmlinks break path equality
+
+`/Users/yjw/.Codex/...` and `/System/Volumes/Data/Users/yjw/.Codex/...`
+refer to the same inode on APFS but compare as different `PathBuf`s.
+`std::fs::canonicalize` does **not** collapse them. WalkDir (used by
+`scan_all`) emits the short form; `notify` on macOS sometimes emits the
+long form. Without normalization, `sessions.iter().find(|m| m.path ==
+event.path)` silently fails → fs_watch pushes a duplicate entry on every
+modify → reconcile drops one form or the other → tokens oscillate.
+
+Fix lives in `fs_watch::normalize_fs_path`: strip `/System/Volumes/Data`
+prefix. Apply at every notify entry point (Create/Modify/Remove) and
+defensively in `replace_preserving_tokens`. Not needed on Linux/Windows.
+
+### 5. First-line type filter is a **blocklist**, not an allowlist
+
+`adapter/Codex.rs::is_native_first_type` used to allowlist
+`summary | user | assistant | system | file-history-snapshot`. Codex
+has since added `permission-mode`, `attachment`, `progress`,
+`worktree-state` — ~20% of a real user's sessions were being silently
+rejected by `parse_meta_fast`, including the one they were actively
+chatting in. The Dashboard appeared frozen at a historical token total
+because the active session literally wasn't in the list.
+
+Invert: reject only known-non-session types (`queue-operation` from
+Codex-mem). Any other first type is treated as a real session. If
+Codex-mem adds new junk later, extend the blocklist.
+
+**Pattern**: when the upstream format evolves faster than we can track
+(CLI version bumps, new event records), allowlists fail open as silent
+data loss. Prefer blocklists for known-bad when the universe of "good"
+isn't enumerable.
+
+### 6. Token accounting is agent-specific
+
+- **Codex** `message.usage` is a **per-turn delta** — sum across turns.
+  Three-level precedence per line: `message.usage` > `toolUseResult.usage`
+  > `toolUseResult.totalTokens` (legacy, routes to input for non-assistant
+  lines, output otherwise). Only one source wins per line to avoid double
+  counting.
+- **Codex** `event_msg.payload.info.total_token_usage` is **cumulative** —
+  overwrite, don't sum. Mapping: `input_tokens - cached_input_tokens` →
+  `input` (fresh input only), `cached_input_tokens` → `cache_read`,
+  `output_tokens` → `output` (already includes `reasoning_output_tokens`,
+  don't add). Codex doesn't expose cache creation — that bucket stays 0.
+- **Dashboard Σ tokens** = `input + output + cache_read + cache_creation`.
+  Cache reads typically dominate by 10-100× because Codex resends
+  context every turn and most of it hits the prompt cache. The number is
+  big but technically correct; unit is `K`/`M`/`B`.
+
+### 7. `updated_at` is monotone-nondecreasing within a fold pass
+
+`fold_claude_line` / `fold_codex_line` only move `updated_at` **forward**,
+never backward. `base_meta` seeds it with the file's current mtime; each
+line's `timestamp` is applied as `max(prev, new)`. Blindly overwriting
+was the historical bug: `parse_meta_fast` reads only ~8 header lines
+(Codex) or the first `session_meta` row (Codex), whose timestamps reflect
+the session's **creation**. Every fs_watch Modify event re-ran fast-parse
+and regressed `updated_at` to that creation time, so the Top Projects
+panel showed days-old ages for sessions that had just been appended to
+seconds ago. Parse_meta_full is unaffected either way — the *last* line's
+timestamp is also the max, so monotone folding produces the same result.
+
+If you ever need a non-monotone "last seen timestamp per line" (e.g.,
+detecting out-of-order writes), add a separate field — don't regress the
+meaning of `updated_at`.
+
+### 8. `scan_all` must cap FD concurrency
+
+`adapter::{Codex,codex}::scan_all` use `buffer_unordered(16)` instead of
+`join_all`. With hundreds of session files on disk, `join_all` tried to
+open every file simultaneously and exhausted the process's FD table — a
+meaningful fraction of `parse_meta_fast` calls failed with EMFILE, and
+those sessions vanished from `state.sessions` silently. In the TUI this
+showed up as Top Projects counts that were a fraction of reality (e.g. a
+ZenNote bucket showing 14 instead of 155) and, because the *newest*
+file was often one of the dropped ones, ages drifted to the *second*
+newest session's `updated_at` — days or weeks stale. 16 matches
+`token_refresh::CONCURRENCY`; the two backgrounds coexist at ≤32 open
+FDs.
+
+`--once-and-exit` happens to survive with `join_all` because it's a
+one-shot with no other FD pressure, which made the bug invisible to
+benchmark output — always reproduce against the long-running TUI.
+
+### 9. Reconcile is a merge, not a replace
+
+`fs_watch::replace_preserving_tokens` is misnamed for historical reasons
+— it's actually a merge. Fresh scan_all output adds-and-updates; it
+never deletes. Deletion flows exclusively through fs_watch's
+`EventKind::Remove` branch.
+
+The reason: `parse_meta_fast` can fail transiently — a file being
+rewritten by `/compact` hands us a mid-write snapshot that isn't valid
+JSONL, an active writer has the file truncated for a brief window, or
+we race EOF on a partial line. Every such failure drops that session
+from `fresh`. With replace semantics, the session would vanish from
+state until the next notify Modify event pushed it back, and Top
+Projects `latest` would flip to the *second-newest* session's
+`updated_at` on every reconcile tick. Carrying forward prev-only
+sessions costs nothing (they'll be refreshed next reconcile or
+corrected on the next real write) and buys stability.
+
+## Debugging loop
+
+`cargo run -p agentmonitor --release -- --debug` writes
+`$XDG_CACHE_HOME/agent-monitor.log` (macOS:
+`~/Library/Caches/dev.agentmonitor.agent-monitor/agent-monitor.log`). Key
+info-level lines:
+
+- `token_refresh: starting` / `token_refresh: first pass done updated=N` —
+  confirms the background sweep ran.
+- `token_refresh: pass done reason={ticker,signal} updated=N` — per-pass.
+- `fs_watch: new session tracked path=...` — should fire **once per
+  session**. If it fires repeatedly for the same path, either normalize is
+  broken (§4) or the path is escaping state for some other reason.
+- `fs_watch: reconcile replaced sessions preserved=N new_paths=M` — bulk
+  sync after 10s. `new_paths > 0` long after startup means a new session
+  file appeared that fs_watch missed via notify.
+- `write_back: accepted path=... old=X new=Y delta=Z` — the authoritative
+  "tokens changed for this path" record. If the user reports stuck
+  totals, grep for the active session's path and look at deltas.
+
+When token totals misbehave, the failure is almost always at one of:
+
+1. `parse_meta_fast` rejecting the file → session missing from state (§5).
+2. `parse_meta_full` returning 0 or too few tokens → adapter logic bug.
+3. fs_watch clobbering `tokens` → broken preserve logic (§1).
+4. notify path ≠ stored path → firmlink / case / Unicode normalization (§4).
+
+Add structured info-level logs at the suspicious boundary and re-run —
+two lines of evidence beats two hours of speculation.
+
+## Test conventions
+
+- Adapter parsing changes: add table-driven tests under
+  `#[cfg(test)] mod tests` in the adapter file. Use `serde_json::json!` to
+  construct fixtures; don't hand-roll JSON strings.
+- fs_watch / token_refresh changes: test via `replace_preserving_tokens`
+  and `write_back` helpers directly. They're `pub(crate)` or private with
+  module-scope tests.
+- Before shipping any change touching data flow: run `cargo test -p
+  agentmonitor --lib && cargo clippy -p agentmonitor --all-targets --
+  -D warnings`.
+
+## CLI
+
+```
+agent-monitor [--once-and-exit] [--sample-interval SECS] [--debug]
+```
+
+`--once-and-exit` prints the session snapshot and exits — fastest way to
+verify a parsing change hasn't regressed the visible-session count.
