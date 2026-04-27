@@ -1,5 +1,5 @@
 {
-  "name": "agentmonitor",
+  "name": "@yeheboo/agentmonitor",
   "version": "0.1.0",
   "description": "High-performance TUI to monitor Claude Code / Codex sessions and processes",
   "license": "MIT",

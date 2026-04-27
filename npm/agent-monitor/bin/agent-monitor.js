@@ -48,10 +48,10 @@ function detectPackageManager() {
 function reinstallHint(pkg) {
   const pm = detectPackageManager();
   const reinstall = {
-    bun:  "bun install -g agentmonitor@latest",
-    pnpm: "pnpm add -g agentmonitor@latest",
-    yarn: "yarn global add agentmonitor@latest",
-    npm:  "npm install -g agentmonitor@latest",
+    bun:  "bun install -g @yeheboo/agentmonitor@latest",
+    pnpm: "pnpm add -g @yeheboo/agentmonitor@latest",
+    yarn: "yarn global add @yeheboo/agentmonitor@latest",
+    npm:  "npm install -g @yeheboo/agentmonitor@latest",
   }[pm];
   return `Missing optional dependency ${pkg}. Reinstall with: ${reinstall}`;
 }
