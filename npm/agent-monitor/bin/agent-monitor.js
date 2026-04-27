@@ -14,12 +14,12 @@ const __dirname = path.dirname(__filename);
 const require = createRequire(import.meta.url);
 
 const PLATFORM_PKG_BY_TARGET = {
-  "aarch64-apple-darwin":       "@agent-monitor/darwin-arm64",
-  "x86_64-apple-darwin":        "@agent-monitor/darwin-x64",
-  "aarch64-unknown-linux-gnu":  "@agent-monitor/linux-arm64-gnu",
-  "x86_64-unknown-linux-gnu":   "@agent-monitor/linux-x64-gnu",
-  "aarch64-pc-windows-msvc":    "@agent-monitor/win32-arm64",
-  "x86_64-pc-windows-msvc":     "@agent-monitor/win32-x64",
+  "aarch64-apple-darwin":       "agentmonitor-darwin-arm64",
+  "x86_64-apple-darwin":        "agentmonitor-darwin-x64",
+  "aarch64-unknown-linux-gnu":  "agentmonitor-linux-arm64-gnu",
+  "x86_64-unknown-linux-gnu":   "agentmonitor-linux-x64-gnu",
+  "aarch64-pc-windows-msvc":    "agentmonitor-win32-arm64",
+  "x86_64-pc-windows-msvc":     "agentmonitor-win32-x64",
 };
 
 function resolveTargetTriple() {
@@ -48,10 +48,10 @@ function detectPackageManager() {
 function reinstallHint(pkg) {
   const pm = detectPackageManager();
   const reinstall = {
-    bun:  "bun install -g agent-monitor@latest",
-    pnpm: "pnpm add -g agent-monitor@latest",
-    yarn: "yarn global add agent-monitor@latest",
-    npm:  "npm install -g agent-monitor@latest",
+    bun:  "bun install -g agentmonitor@latest",
+    pnpm: "pnpm add -g agentmonitor@latest",
+    yarn: "yarn global add agentmonitor@latest",
+    npm:  "npm install -g agentmonitor@latest",
   }[pm];
   return `Missing optional dependency ${pkg}. Reinstall with: ${reinstall}`;
 }

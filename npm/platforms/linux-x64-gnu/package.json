@@ -1,5 +1,5 @@
 {
-  "name": "@agent-monitor/linux-x64-gnu",
+  "name": "agentmonitor-linux-x64-gnu",
   "version": "0.1.0",
   "description": "agent-monitor native binary for Linux / x86_64 (glibc)",
   "license": "MIT",

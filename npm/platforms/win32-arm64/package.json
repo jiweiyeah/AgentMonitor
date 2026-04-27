@@ -1,5 +1,5 @@
 {
-  "name": "@agent-monitor/win32-arm64",
+  "name": "agentmonitor-win32-arm64",
   "version": "0.1.0",
   "description": "agent-monitor native binary for Windows / aarch64",
   "license": "MIT",
