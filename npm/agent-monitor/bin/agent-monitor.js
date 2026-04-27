@@ -19,7 +19,7 @@ const PLATFORM_PKG_BY_TARGET = {
   "aarch64-unknown-linux-gnu":  "agentmonitor-linux-arm64-gnu",
   "x86_64-unknown-linux-gnu":   "agentmonitor-linux-x64-gnu",
   "aarch64-pc-windows-msvc":    "agentmonitor-win32-arm64",
-  "x86_64-pc-windows-msvc":     "agentmonitor-win32-x64",
+  "x86_64-pc-windows-msvc":     "agentmonitor-windows-x64",
 };
 
 function resolveTargetTriple() {

@@ -1,5 +1,5 @@
 {
-  "name": "agentmonitor-win32-x64",
+  "name": "agentmonitor-windows-x64",
   "version": "0.1.0",
   "description": "agent-monitor native binary for Windows / x86_64",
   "license": "MIT",

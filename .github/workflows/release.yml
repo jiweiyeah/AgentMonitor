@@ -107,6 +107,12 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for dir in npm/platforms/*/; do
+            name=$(node -p "require('./${dir}/package.json').name")
+            version=$(node -p "require('./${dir}/package.json').version")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "Skipping ${name}@${version}; already published"
+              continue
+            fi
             echo "Publishing $dir"
             (cd "$dir" && npm publish --access public)
           done
@@ -114,4 +120,11 @@ jobs:
       - name: Publish main package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: (cd npm/agent-monitor && npm publish --access public)
+        run: |
+          name=$(node -p "require('./npm/agent-monitor/package.json').name")
+          version=$(node -p "require('./npm/agent-monitor/package.json').version")
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "Skipping ${name}@${version}; already published"
+            exit 0
+          fi
+          (cd npm/agent-monitor && npm publish --access public)
