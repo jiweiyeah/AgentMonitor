@@ -45,7 +45,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .map(|(i, t)| Line::from(Span::raw(format!(" {} {} ", i + 1, t.title()))))
         .collect();
     let title = Line::from(vec![
-        Span::styled(" agent-monitor ", theme::title()),
+        Span::styled(" Agent Monitor ", theme::title()),
         Span::styled(format!("v{} ", env!("CARGO_PKG_VERSION")), theme::muted()),
     ]);
     let tabs = Tabs::new(titles)
