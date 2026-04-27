@@ -5,7 +5,9 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "agent-monitor": "bin/agent-monitor.js"
+    "agent-monitor": "bin/agent-monitor.js",
+    "agentm": "bin/agent-monitor.js",
+    "agentmonitor": "bin/agent-monitor.js"
   },
   "files": ["bin/"],
   "engines": {

@@ -5,6 +5,9 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build ${{ matrix.target }}
@@ -81,9 +84,23 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
+      - name: Check npm token
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN repository secret is required to publish"
+            exit 1
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           path: npm/platforms
+
+      - name: Restore executable bits
+        run: |
+          chmod +x npm/platforms/darwin-*/bin/agent-monitor
+          chmod +x npm/platforms/linux-*/bin/agent-monitor
 
       - name: Publish platform packages
         env:

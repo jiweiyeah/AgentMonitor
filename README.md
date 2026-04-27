@@ -24,6 +24,23 @@ cargo run -p agentmonitor --release
 
 构建产物在 `target/release/agent-monitor`，可直接拷贝到 `$PATH`。
 
+## npm 安装
+
+发布到 npm 后可直接运行：
+
+```bash
+npx agent-monitor
+```
+
+或全局安装后使用任一命令：
+
+```bash
+npm install -g agent-monitor
+agent-monitor
+agentm
+agentmonitor
+```
+
 ## CLI 参数
 
 ```
@@ -118,6 +135,43 @@ crates/agentmonitor/
     main.rs        入口
 npm/               预编译二进制的 npm 发布管道
 ```
+
+## 发布到 npm
+
+发布由 GitHub Actions 执行，只有推送 `v*` tag 时才会发布；普通 `git push origin main` 不会发布。
+
+首次发布前，在 npm 网站创建可发布这些包的 access token，并在 GitHub 仓库中添加 Actions secret：
+
+```text
+NPM_TOKEN=<npm access token>
+```
+
+每次发布新版本都要同步更新版本号：
+
+- 根目录 `Cargo.toml` 的 `workspace.package.version`
+- `npm/agent-monitor/package.json` 的 `version`
+- `npm/agent-monitor/package.json` 的 `optionalDependencies` 版本
+- `npm/platforms/*/package.json` 的 `version`
+
+发布前检查：
+
+```bash
+cargo test -p agentmonitor --lib
+cargo clippy -p agentmonitor --all-targets -- -D warnings
+npm pack ./npm/agent-monitor --dry-run
+```
+
+提交并推送 tag：
+
+```bash
+git add Cargo.toml Cargo.lock npm/agent-monitor/package.json npm/platforms/*/package.json
+git commit -m "chore: release 0.1.1"
+git push origin main
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+GitHub Actions 会构建各平台二进制，先发布 `@agent-monitor/*` 平台包，再发布主包 `agent-monitor`。
 
 ## License
 
