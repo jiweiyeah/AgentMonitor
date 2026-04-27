@@ -48,7 +48,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 status_marker(s.status),
                 Span::raw(" "),
                 Span::styled(
-                    format!("{:<10} ", s.agent_label()),
+                    format!("{:<13} ", s.agent_label()),
                     Style::default()
                         .fg(theme::accent())
                         .add_modifier(Modifier::BOLD),

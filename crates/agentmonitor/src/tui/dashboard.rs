@@ -404,10 +404,21 @@ fn render_top_projects(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Max display width across all agent names: "ClaudeDesktop" = 13 chars.
+const AGENT_COL_WIDTH: usize = 14;
+
 fn render_tokens_by_agent(frame: &mut Frame, area: Rect, rows: &[AgentTokenRow]) {
     let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 1);
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<12} {:>4}  ", "Agent", "Ses"), theme::muted()),
+        Span::styled(
+            format!(
+                "{:<width$} {:>4}  ",
+                "Agent",
+                "Ses",
+                width = AGENT_COL_WIDTH
+            ),
+            theme::muted(),
+        ),
         Span::styled(
             format!(
                 "{:>9}  {:>9}  {:>9}  {:>9}  {:>9}",
@@ -420,7 +431,11 @@ fn render_tokens_by_agent(frame: &mut Frame, area: Rect, rows: &[AgentTokenRow])
         let tok = &r.tokens;
         lines.push(Line::from(vec![
             Span::styled(
-                format!("{:<12} ", agent_display_name(r.agent)),
+                format!(
+                    "{:<width$} ",
+                    agent_display_name(r.agent),
+                    width = AGENT_COL_WIDTH
+                ),
                 Style::default()
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),

@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod claude_desktop;
 pub mod codex;
 pub mod conversation;
 pub mod types;
@@ -12,6 +13,7 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 
 pub use claude::ClaudeAdapter;
+pub use claude_desktop::ClaudeDesktopAdapter;
 pub use codex::CodexAdapter;
 pub use conversation::{Block, ConversationEvent};
 pub use types::*;

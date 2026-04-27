@@ -88,6 +88,7 @@ impl SessionMeta {
 pub fn agent_display_name(id: &str) -> &'static str {
     match id {
         "claude" => "ClaudeCode",
+        "claude-desktop" => "ClaudeDesktop",
         "codex" => "Codex",
         _ => "unknown",
     }

@@ -7,6 +7,7 @@ pub struct Config {
     pub sample_interval: Duration,
     pub metrics_capacity: usize,
     pub claude_root: Option<PathBuf>,
+    pub claude_desktop_root: Option<PathBuf>,
     pub codex_root: Option<PathBuf>,
 }
 
@@ -17,6 +18,12 @@ impl Default for Config {
             sample_interval: Duration::from_secs(2),
             metrics_capacity: 300,
             claude_root: home.as_ref().map(|h| h.join(".claude").join("projects")),
+            claude_desktop_root: home.as_ref().map(|h| {
+                h.join("Library")
+                    .join("Application Support")
+                    .join("Claude-3p")
+                    .join("local-agent-mode-sessions")
+            }),
             codex_root: home.as_ref().map(|h| h.join(".codex").join("sessions")),
         }
     }

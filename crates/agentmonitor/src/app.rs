@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 
 use crate::adapter::conversation::ConversationEvent;
 use crate::adapter::types::{MessagePreview, SessionMeta, SessionStatus};
-use crate::adapter::{ClaudeAdapter, CodexAdapter, DynAdapter};
+use crate::adapter::{ClaudeAdapter, ClaudeDesktopAdapter, CodexAdapter, DynAdapter};
 use crate::collector::metrics::{MetricsStore, ProcessEntry};
 use crate::collector::token_refresh::TokenCache;
 use crate::config::Config;
@@ -439,6 +439,7 @@ impl App {
     pub async fn new(config: Config) -> Result<Self> {
         let adapters: Vec<DynAdapter> = vec![
             Arc::new(ClaudeAdapter::new(config.claude_root.clone())),
+            Arc::new(ClaudeDesktopAdapter::new(config.claude_desktop_root.clone())),
             Arc::new(CodexAdapter::new(config.codex_root.clone())),
         ];
         let state = Arc::new(RwLock::new(AppState::default()));

@@ -13,7 +13,7 @@ use super::conversation::{Block, ConversationEvent};
 use super::types::{MessagePreview, MessageRole, SessionMeta, SessionStatus, TokenStats};
 use super::AgentAdapter;
 
-const HEADER_LINE_SCAN: usize = 8;
+pub(crate) const HEADER_LINE_SCAN: usize = 8;
 
 pub struct ClaudeAdapter {
     root: Option<PathBuf>,
@@ -239,7 +239,7 @@ impl AgentAdapter for ClaudeAdapter {
     }
 }
 
-fn fold_claude_line(v: &Value, meta: &mut SessionMeta) {
+pub(crate) fn fold_claude_line(v: &Value, meta: &mut SessionMeta) {
     if let Some(id) = v.get("sessionId").and_then(|s| s.as_str()) {
         if meta.id.is_empty() {
             meta.id = id.to_string();
@@ -402,7 +402,7 @@ fn extract_text(v: &Value) -> Option<String> {
     None
 }
 
-fn decode_cwd_from_parent(path: &Path) -> Option<PathBuf> {
+pub(crate) fn decode_cwd_from_parent(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?.file_name()?.to_str()?;
     if !parent.starts_with('-') {
         return None;
@@ -414,7 +414,7 @@ fn decode_cwd_from_parent(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(decoded))
 }
 
-fn is_native_first_type(t: Option<&str>) -> bool {
+pub(crate) fn is_native_first_type(t: Option<&str>) -> bool {
     // Claude Code's session JSONL can open with many record types depending
     // on CLI version: conversation content (user/assistant/system/summary),
     // environment metadata (permission-mode, attachment, progress,
@@ -435,14 +435,14 @@ fn is_native_first_type(t: Option<&str>) -> bool {
     }
 }
 
-async fn meta_of(file: &fs::File) -> (u64, Option<DateTime<Utc>>) {
+pub(crate) async fn meta_of(file: &fs::File) -> (u64, Option<DateTime<Utc>>) {
     let m = file.metadata().await.ok();
     let size = m.as_ref().map(|m| m.len()).unwrap_or(0);
     let mtime = m.and_then(|m| m.modified().ok()).map(DateTime::<Utc>::from);
     (size, mtime)
 }
 
-fn infer_status(updated_at: Option<DateTime<Utc>>) -> SessionStatus {
+pub(crate) fn infer_status(updated_at: Option<DateTime<Utc>>) -> SessionStatus {
     let Some(t) = updated_at else {
         return SessionStatus::Unknown;
     };
@@ -456,7 +456,7 @@ fn infer_status(updated_at: Option<DateTime<Utc>>) -> SessionStatus {
     }
 }
 
-fn truncate(s: String, max: usize) -> String {
+pub(crate) fn truncate(s: String, max: usize) -> String {
     if s.chars().count() <= max {
         s
     } else {
@@ -466,7 +466,7 @@ fn truncate(s: String, max: usize) -> String {
     }
 }
 
-fn claude_event_from_line(v: &Value) -> Option<ConversationEvent> {
+pub(crate) fn claude_event_from_line(v: &Value) -> Option<ConversationEvent> {
     let t = v.get("type").and_then(|s| s.as_str())?;
     let ts = v
         .get("timestamp")

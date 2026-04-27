@@ -78,7 +78,7 @@ fn render_table(
         .collect();
 
     let widths = [
-        Constraint::Length(12),
+        Constraint::Length(14),
         Constraint::Length(8),
         Constraint::Min(20),
         Constraint::Length(10),
