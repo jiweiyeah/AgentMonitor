@@ -29,13 +29,13 @@ cargo run -p agentmonitor --release
 发布到 npm 后可直接运行：
 
 ```bash
-npx agentmonitor
+npx @yeheboo/agentmonitor
 ```
 
 或全局安装后使用任一命令：
 
 ```bash
-npm install -g agentmonitor
+npm install -g @yeheboo/agentmonitor
 agent-monitor
 agentm
 agentmonitor
@@ -171,7 +171,7 @@ git tag v0.1.1
 git push origin v0.1.1
 ```
 
-GitHub Actions 会构建各平台二进制，先发布 `agentmonitor-*` 平台包，再发布主包 `agentmonitor`。
+GitHub Actions 会构建各平台二进制，先发布 `agentmonitor-*` 平台包，再发布主包 `@yeheboo/agentmonitor`。
 
 ## License
 
