@@ -6,7 +6,7 @@ members = ["crates/agentmonitor"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/yjw/agent-monitor"
+repository = "https://github.com/jiweiyeah/AgentMonitor"
 rust-version = "1.82"
 
 [profile.release]
