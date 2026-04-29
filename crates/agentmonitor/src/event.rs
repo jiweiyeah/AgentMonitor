@@ -515,7 +515,12 @@ fn activate_or_cycle_selected_setting(app: &mut App, forward: bool) {
     if items.is_empty() {
         return;
     }
-    let idx = app.selected_setting.min(items.len() - 1);
+    let idx = app.selected_setting.min(items.len());
+    if idx == items.len() {
+        // GitHub link row — open in browser.
+        open_url("https://github.com/jiweiyeah/AgentMonitor", app);
+        return;
+    }
     if items[idx] == SettingsItem::Keybindings {
         app.settings_keybindings_open = true;
         app.keybinding_conflict = None;
@@ -530,7 +535,12 @@ fn cycle_selected_setting(app: &mut App, forward: bool) {
     if items.is_empty() {
         return;
     }
-    let idx = app.selected_setting.min(items.len() - 1);
+    let idx = app.selected_setting.min(items.len());
+    if idx == items.len() {
+        // GitHub link row — open in browser on any cycle attempt.
+        open_url("https://github.com/jiweiyeah/AgentMonitor", app);
+        return;
+    }
     if forward {
         items[idx].cycle_forward();
     } else {
@@ -595,7 +605,8 @@ fn move_selection(app: &mut App, delta: i32) {
             app.state.write().dirty = true;
         }
         Tab::Settings => {
-            let len = SettingsItem::all().len();
+            // +1 for the GitHub link row appended after SettingsItem::all().
+            let len = SettingsItem::all().len() + 1;
             if len == 0 {
                 return;
             }
@@ -789,6 +800,22 @@ fn rescan_sessions(app: &App) {
     });
 }
 
+fn open_url(url: &str, app: &mut App) {
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(url).spawn()
+    };
+    if let Err(err) = result {
+        tracing::warn!(?err, "failed to open browser");
+        app.state.write().toast = Some("Failed to open browser".into());
+        app.state.write().dirty = true;
+    } else {
+        app.state.write().toast = Some("Opening in browser...".into());
+        app.state.write().dirty = true;
+    }
+}
+
 fn open_github_star(app: &mut App) {
     let repo = "jiweiyeah/AgentMonitor";
 
@@ -838,20 +865,7 @@ fn open_github_star(app: &mut App) {
     }
 
     // Fallback: open the GitHub page in the default browser.
-    let url = format!("https://github.com/{}", repo);
-    let result = if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(&url).spawn()
-    } else {
-        std::process::Command::new("xdg-open").arg(&url).spawn()
-    };
-    if let Err(err) = result {
-        tracing::warn!(?err, "failed to open GitHub star page");
-        app.state.write().toast = Some("Failed to open browser".into());
-        app.state.write().dirty = true;
-    } else {
-        app.state.write().toast = Some("Opening GitHub in browser...".into());
-        app.state.write().dirty = true;
-    }
+    open_url(&format!("https://github.com/{}", repo), app);
 }
 
 fn prompt_delete_selected_session(app: &mut App) {

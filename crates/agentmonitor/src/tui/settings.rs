@@ -47,8 +47,8 @@ impl SettingsItem {
             SettingsItem::SampleInterval,
             SettingsItem::IncludeCacheInTotal,
             SettingsItem::Terminal,
-            SettingsItem::StarStatus,
             SettingsItem::Keybindings,
+            SettingsItem::StarStatus,
         ]
     }
 
@@ -189,8 +189,36 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut list_state = ListState::default();
     list_state.select(Some(
-        app.selected_setting.min(SettingsItem::all().len() - 1),
+        app.selected_setting.min(SettingsItem::all().len()),
     ));
+
+    let mut items = items;
+    let url = "https://github.com/jiweiyeah/AgentMonitor";
+    // OSC 8 hyperlink escape sequences make the URL clickable in terminals
+    // that support the protocol (iTerm2, Ghostty, Kitty, Windows Terminal, etc.).
+    let osc8_start = format!("\x1b]8;;{}\x1b\\", url);
+    let osc8_end = "\x1b]8;;\x1b\\";
+    let link_text = format!(
+        "{}{}{}",
+        osc8_start,
+        pad_display_width("github.com/jiweiyeah/AgentMonitor", 24),
+        osc8_end
+    );
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            pad_display_width("GitHub", 28),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            link_text,
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  Enter"),
+    ])));
 
     let list = List::new(items)
         .block(
