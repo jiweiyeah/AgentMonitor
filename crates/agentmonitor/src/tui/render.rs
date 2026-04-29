@@ -30,14 +30,27 @@ pub async fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) 
 }
 
 fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(5),
-            Constraint::Length(1),
-        ])
-        .split(area);
+    let has_toast = app.state.read().toast.is_some();
+    let chunks = if has_toast {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Length(1),
+                Constraint::Min(4),
+                Constraint::Length(1),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(5),
+                Constraint::Length(1),
+            ])
+            .split(area)
+    };
 
     let titles: Vec<Line> = Tab::all()
         .iter()
@@ -55,14 +68,30 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
         .divider("|");
     frame.render_widget(tabs, chunks[0]);
 
-    match app.tab {
-        Tab::Dashboard => dashboard::render(frame, chunks[1], app),
-        Tab::Sessions => sessions::render(frame, chunks[1], app),
-        Tab::Settings => settings_tab::render(frame, chunks[1], app),
+    let body_idx = if has_toast { 2 } else { 1 };
+    let footer_idx = if has_toast { 3 } else { 2 };
+
+    if has_toast {
+        if let Some(ref toast) = app.state.read().toast {
+            let toast_line = Line::from(vec![
+                Span::styled(" ⭐ ", Style::default().fg(Color::Yellow)),
+                Span::styled(toast.clone(), Style::default().fg(Color::White)),
+            ]);
+            frame.render_widget(
+                Paragraph::new(toast_line).style(Style::default().bg(Color::DarkGray)),
+                chunks[1],
+            );
+        }
     }
 
-    frame.render_widget(Clear, chunks[2]);
-    frame.render_widget(Paragraph::new(footer_line(app)), chunks[2]);
+    match app.tab {
+        Tab::Dashboard => dashboard::render(frame, chunks[body_idx], app),
+        Tab::Sessions => sessions::render(frame, chunks[body_idx], app),
+        Tab::Settings => settings_tab::render(frame, chunks[body_idx], app),
+    }
+
+    frame.render_widget(Clear, chunks[footer_idx]);
+    frame.render_widget(Paragraph::new(footer_line(app)), chunks[footer_idx]);
 }
 
 pub(crate) fn footer_line(app: &App) -> Line<'static> {
@@ -102,6 +131,7 @@ pub(crate) fn footer_line(app: &App) -> Line<'static> {
             "footer.delete",
         );
     } else {
+        push_action(&mut spans, &keybindings, KeyAction::Star, "footer.star");
         push_action(&mut spans, &keybindings, KeyAction::Quit, "footer.quit");
         push_action(
             &mut spans,

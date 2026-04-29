@@ -33,6 +33,7 @@ pub enum SettingsItem {
     SampleInterval,
     IncludeCacheInTotal,
     Terminal,
+    StarStatus,
     Keybindings,
 }
 
@@ -46,6 +47,7 @@ impl SettingsItem {
             SettingsItem::SampleInterval,
             SettingsItem::IncludeCacheInTotal,
             SettingsItem::Terminal,
+            SettingsItem::StarStatus,
             SettingsItem::Keybindings,
         ]
     }
@@ -59,6 +61,7 @@ impl SettingsItem {
             SettingsItem::SampleInterval => "settings.sample_interval",
             SettingsItem::IncludeCacheInTotal => "settings.include_cache",
             SettingsItem::Terminal => "settings.terminal",
+            SettingsItem::StarStatus => "settings.star_status",
             SettingsItem::Keybindings => "settings.keybindings",
         }
     }
@@ -79,6 +82,13 @@ impl SettingsItem {
             }
             .to_string(),
             SettingsItem::Terminal => s.terminal.label().to_string(),
+            SettingsItem::StarStatus => {
+                if crate::settings::which_exists("gh") {
+                    t(s.star_status.label()).to_string()
+                } else {
+                    t("settings.star_browser_only").to_string()
+                }
+            }
             SettingsItem::Keybindings => {
                 format!("{} actions", crate::settings::KeyAction::all().len())
             }
@@ -96,6 +106,7 @@ impl SettingsItem {
                 s.include_cache_in_total = !s.include_cache_in_total
             }
             SettingsItem::Terminal => s.terminal = s.terminal.cycle(),
+            SettingsItem::StarStatus => {}
             SettingsItem::Keybindings => {}
         });
     }
@@ -111,6 +122,7 @@ impl SettingsItem {
                 s.include_cache_in_total = !s.include_cache_in_total
             }
             SettingsItem::Terminal => s.terminal = s.terminal.cycle_back(),
+            SettingsItem::StarStatus => {}
             SettingsItem::Keybindings => {}
         });
     }

@@ -247,6 +247,14 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
 }
 
 fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {
+    // Clear any transient toast before processing the next key.
+    {
+        let mut state = app.state.write();
+        if state.toast.is_some() {
+            state.toast = None;
+            state.dirty = true;
+        }
+    }
     if app.capturing_keybinding.is_some() && app.tab == Tab::Settings {
         handle_keybinding_capture(code, modifiers, app);
         return false;
@@ -292,6 +300,9 @@ fn handle_normal(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool 
         }
         (code, modifiers) if key_matches(KeyAction::Refresh, code, modifiers) => {
             rescan_sessions(app);
+        }
+        (code, modifiers) if key_matches(KeyAction::Star, code, modifiers) => {
+            open_github_star(app);
         }
         _ => {}
     }
@@ -776,6 +787,71 @@ fn rescan_sessions(app: &App) {
         fresh.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         fs_watch::replace_preserving_tokens(&state, fresh);
     });
+}
+
+fn open_github_star(app: &mut App) {
+    let repo = "jiweiyeah/AgentMonitor";
+
+    // Try `gh api` if the GitHub CLI is available.
+    if crate::settings::which_exists("gh") {
+        // Check whether already starred. The endpoint returns 204 (success) when
+        // starred and 404 (failure) when not, so `status.success()` is enough.
+        let check = std::process::Command::new("gh")
+            .args(["api", &format!("user/starred/{}", repo)])
+            .output();
+
+        match check {
+            Ok(out) if out.status.success() => {
+                crate::settings::update(|s| s.star_status = crate::settings::StarStatus::Starred);
+                app.state.write().toast = Some("Already starred on GitHub".into());
+                app.state.write().dirty = true;
+                return;
+            }
+            Ok(_) => {
+                // 404 — not starred yet. Continue to star it.
+            }
+            Err(err) => {
+                tracing::warn!(?err, "failed to check star status via gh api");
+            }
+        }
+
+        // Star the repository via the REST API.
+        let star = std::process::Command::new("gh")
+            .args(["api", "-X", "PUT", &format!("user/starred/{}", repo)])
+            .output();
+
+        match star {
+            Ok(out) if out.status.success() => {
+                crate::settings::update(|s| s.star_status = crate::settings::StarStatus::Starred);
+                app.state.write().toast = Some("Starred on GitHub!".into());
+                app.state.write().dirty = true;
+                return;
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                tracing::warn!(stderr = %stderr, "gh api star failed, falling back to browser");
+            }
+            Err(err) => {
+                tracing::warn!(?err, "failed to spawn gh api star, falling back to browser");
+            }
+        }
+    }
+
+    // Fallback: open the GitHub page in the default browser.
+    let url = format!("https://github.com/{}", repo);
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&url).spawn()
+    } else {
+        std::process::Command::new("xdg-open").arg(&url).spawn()
+    };
+    if let Err(err) = result {
+        tracing::warn!(?err, "failed to open GitHub star page");
+        app.state.write().toast = Some("Failed to open browser".into());
+        app.state.write().dirty = true;
+    } else {
+        app.state.write().toast = Some("Opening GitHub in browser...".into());
+        app.state.write().dirty = true;
+    }
 }
 
 fn prompt_delete_selected_session(app: &mut App) {
@@ -1790,6 +1866,7 @@ mod tests {
                 preview: None,
                 mode: Mode::Normal,
                 conversation: None,
+                toast: None,
             })),
             metrics: Arc::new(MetricsStore::new(8)),
             adapters: vec![

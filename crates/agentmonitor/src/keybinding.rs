@@ -76,6 +76,7 @@ pub enum KeyAction {
     FilterCancel,
     FilterApply,
     FilterDeleteChar,
+    Star,
 }
 
 impl KeyAction {
@@ -123,6 +124,7 @@ impl KeyAction {
             KeyAction::FilterCancel,
             KeyAction::FilterApply,
             KeyAction::FilterDeleteChar,
+            KeyAction::Star,
         ]
     }
 
@@ -170,6 +172,7 @@ impl KeyAction {
             KeyAction::FilterCancel | KeyAction::FilterApply | KeyAction::FilterDeleteChar => {
                 KeyContext::FilterInput
             }
+            KeyAction::Star => KeyContext::Global,
         }
     }
 
@@ -217,6 +220,7 @@ impl KeyAction {
             KeyAction::FilterCancel => "key_action.filter_cancel",
             KeyAction::FilterApply => "key_action.filter_apply",
             KeyAction::FilterDeleteChar => "key_action.filter_delete_char",
+            KeyAction::Star => "key_action.star",
         }
     }
 }
@@ -583,5 +587,6 @@ pub fn default_bindings(action: KeyAction) -> Vec<KeyBinding> {
         KeyAction::FilterCancel => vec![KeyBinding::plain(KeyCodeSpec::Esc)],
         KeyAction::FilterApply => vec![KeyBinding::plain(KeyCodeSpec::Enter)],
         KeyAction::FilterDeleteChar => vec![KeyBinding::plain(KeyCodeSpec::Backspace)],
+        KeyAction::Star => vec![KeyBinding::plain(KeyCodeSpec::Char('*'))],
     }
 }

@@ -51,6 +51,7 @@ fn t_en(key: &str) -> &'static str {
         "footer.half_page" => "half-page",
         "footer.top_bottom" => "top/bottom",
         "footer.expand_collapse" => "expand/collapse",
+        "footer.star" => "star",
 
         // ── Dashboard ───────────────────────────────────
         "dashboard.overview" => " Overview ",
@@ -133,6 +134,11 @@ fn t_en(key: &str) -> &'static str {
         "settings.sample_interval" => "Sampling interval",
         "settings.include_cache" => "Count cache tokens in Σ",
         "settings.terminal" => "Terminal",
+        "settings.star_status" => "GitHub Star",
+        "settings.star_browser_only" => "browser only (gh not found)",
+        "starred" => "starred",
+        "not starred" => "not starred",
+        "unknown" => "unknown",
         "settings.keybindings" => "Keybindings",
         "settings.keybindings_title" => " Keybindings ",
         "settings.keybindings_hint" => {
@@ -191,6 +197,7 @@ fn t_en(key: &str) -> &'static str {
         "key_action.filter_cancel" => "Cancel filter",
         "key_action.filter_apply" => "Apply filter",
         "key_action.filter_delete_char" => "Delete filter character",
+        "key_action.star" => "Star on GitHub",
         "settings.on" => "on",
         "settings.off" => "off",
         "settings.note_interval" => "Sampling interval changes take effect after restart.",
@@ -234,6 +241,7 @@ fn t_zh(key: &str) -> Option<&'static str> {
         "footer.half_page" => "半页",
         "footer.top_bottom" => "顶/底",
         "footer.expand_collapse" => "展开/收起",
+        "footer.star" => "加星",
 
         "dashboard.overview" => " 概览 ",
         "dashboard.sessions" => "会话数",
@@ -309,6 +317,11 @@ fn t_zh(key: &str) -> Option<&'static str> {
         "settings.sample_interval" => "进程采样间隔",
         "settings.include_cache" => "Σ 中包含 cache tokens",
         "settings.terminal" => "终端",
+        "settings.star_status" => "GitHub 加星",
+        "settings.star_browser_only" => "仅浏览器 (未找到 gh)",
+        "starred" => "已加星",
+        "not starred" => "未加星",
+        "unknown" => "未知",
         "settings.keybindings" => "快捷键",
         "settings.keybindings_title" => " 快捷键 ",
         "settings.keybindings_hint" => {
@@ -367,6 +380,7 @@ fn t_zh(key: &str) -> Option<&'static str> {
         "key_action.filter_cancel" => "取消过滤",
         "key_action.filter_apply" => "应用过滤",
         "key_action.filter_delete_char" => "删除过滤字符",
+        "key_action.star" => "在 GitHub 上加星",
         "settings.on" => "开",
         "settings.off" => "关",
         "settings.note_interval" => "采样间隔需要重启后生效。",

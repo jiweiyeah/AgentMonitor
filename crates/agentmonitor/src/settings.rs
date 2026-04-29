@@ -309,6 +309,29 @@ pub(crate) fn which_exists(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Star status tracked locally so the Settings tab can show whether the user
+/// has starred the project. We do not query GitHub on startup; the status is
+/// updated when the user presses `*` and `gh star` succeeds (or reports already
+/// starred).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StarStatus {
+    #[default]
+    Unknown,
+    Starred,
+    NotStarred,
+}
+
+impl StarStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            StarStatus::Unknown => "unknown",
+            StarStatus::Starred => "starred",
+            StarStatus::NotStarred => "not starred",
+        }
+    }
+}
+
 /// Discrete choices for the process-sampler cadence. Offered as a fixed menu
 /// rather than a free-form integer so Settings tab navigation stays keyboard-
 /// driven — there's no numeric input widget.
@@ -364,6 +387,15 @@ pub struct Settings {
     /// Terminal emulator used to resume sessions. Only terminals detected on
     /// the system are offered in the Settings UI.
     pub terminal: TerminalApp,
+    /// Local cache of whether the user has starred the project on GitHub.
+    /// Updated automatically when `*` is pressed and `gh star` runs.
+    pub star_status: StarStatus,
+    /// How many times the app has been launched. Used to decide when to show
+    /// the gentle star prompt toast.
+    pub launch_count: u32,
+    /// How many times the star prompt toast has already been shown.
+    /// Capped at 3 so the prompt never becomes spam.
+    pub star_prompt_count: u32,
     /// User-editable keyboard shortcuts, grouped by context.
     pub keybindings: KeyBindings,
 }
@@ -378,6 +410,9 @@ impl Default for Settings {
             sample_interval: SampleIntervalSecs::default(),
             include_cache_in_total: true,
             terminal: TerminalApp::default(),
+            star_status: StarStatus::default(),
+            launch_count: 0,
+            star_prompt_count: 0,
             keybindings: KeyBindings::default(),
         }
     }

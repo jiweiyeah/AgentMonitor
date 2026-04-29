@@ -167,6 +167,8 @@ pub struct AppState {
     /// is a modal, only one is visible at a time, and re-opening the same
     /// session hits this slot directly.
     pub conversation: Option<ConversationCache>,
+    /// Transient toast message shown after star actions. Cleared on next key.
+    pub toast: Option<String>,
 }
 
 impl AppState {
@@ -465,6 +467,33 @@ impl App {
             token_cache,
         };
         app.initial_scan().await?;
+
+        // Increment launch counter and maybe show the gentle star prompt.
+        {
+            let settings = crate::settings::get();
+            let new_count = settings.launch_count.saturating_add(1);
+            let should_prompt = settings.star_prompt_count < 3
+                && (new_count == 5 || (new_count > 5 && (new_count - 5) % 20 == 0));
+            if should_prompt {
+                let key_display = settings.keybindings.binding_display(crate::keybinding::KeyAction::Star);
+                let msg = match settings.language {
+                    crate::settings::Language::Zh => {
+                        format!("喜欢 Agent Monitor 吗？按 {} 在 GitHub 上加星支持我们", key_display)
+                    }
+                    _ => {
+                        format!("Enjoying Agent Monitor? Press {} to star us on GitHub", key_display)
+                    }
+                };
+                app.state.write().toast = Some(msg);
+                crate::settings::update(|s| {
+                    s.launch_count = new_count;
+                    s.star_prompt_count = s.star_prompt_count.saturating_add(1);
+                });
+            } else {
+                crate::settings::update(|s| s.launch_count = new_count);
+            }
+        }
+
         Ok(app)
     }
 
@@ -847,6 +876,7 @@ mod tests {
                 path: remove_path.clone(),
             },
             conversation: Some(ConversationCache::loading(remove_path.clone())),
+            toast: None,
         };
 
         state.remove_session_path(&remove_path);
@@ -899,6 +929,7 @@ mod tests {
                 path: keep_path.clone(),
             },
             conversation: Some(ConversationCache::loading(keep_path.clone())),
+            toast: None,
         };
 
         state.remove_session_path(&remove_path);
