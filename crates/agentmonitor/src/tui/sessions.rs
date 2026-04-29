@@ -55,14 +55,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 ),
                 Span::styled(format!("{} ", when), theme::muted()),
                 Span::styled(
-                    format!("{:<8} ", s.short_id()),
+                    format!("{:<12} ", s.short_id()),
                     Style::default().fg(Color::White),
                 ),
                 Span::styled(
                     format!("{:>8} ", token_label),
                     Style::default().fg(theme::SUCCESS),
                 ),
-                Span::raw(shorten(&s.cwd_display(), 22)),
+                Span::raw(shorten(&s.cwd_display(), 18)),
             ]);
             ListItem::new(line)
         })

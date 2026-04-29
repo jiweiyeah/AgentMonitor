@@ -2,6 +2,7 @@ pub mod claude;
 pub mod claude_desktop;
 pub mod codex;
 pub mod conversation;
+pub mod opencode;
 pub mod types;
 
 use std::path::Path;
@@ -16,6 +17,7 @@ pub use claude::ClaudeAdapter;
 pub use claude_desktop::ClaudeDesktopAdapter;
 pub use codex::CodexAdapter;
 pub use conversation::{Block, ConversationEvent};
+pub use opencode::OpencodeAdapter;
 pub use types::*;
 
 /// Shared adapter handle stored in [`App`].
@@ -74,6 +76,13 @@ pub trait AgentAdapter: Send + Sync + 'static {
     }
     /// True if this `sysinfo` process looks like the agent's main process.
     fn matches_process(&self, cmd: &[String], exe: Option<&Path>) -> bool;
+    /// Return `true` if session files for this adapter exist on the local
+    /// filesystem and can be `stat()`ed. Adapters backed by a database (e.g.
+    /// OpenCode) use virtual paths that have no real file, so token refresh
+    /// should skip the metadata check and parse directly.
+    fn needs_fs_stat(&self) -> bool {
+        true
+    }
     /// Fast parse: header + mtime/size, used on startup and on fs events.
     /// Must stay well under 1 ms per call even for multi-MB files.
     async fn parse_meta_fast(&self, path: &Path) -> Result<SessionMeta>;

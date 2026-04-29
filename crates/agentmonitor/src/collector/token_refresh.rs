@@ -158,20 +158,30 @@ async fn refresh_one(
     // the cache on — writing the *pre-parse* mtime would be unsound when the
     // file was modified during our read, causing subsequent lookups to miss
     // and tokens to flicker.
-    let Ok(md) = tokio::fs::metadata(path).await else {
-        return false;
-    };
-    let Ok(mtime_before) = md.modified() else {
-        return false;
+    let mtime_before = match tokio::fs::metadata(path).await {
+        Ok(md) => match md.modified() {
+            Ok(t) => Some(t),
+            Err(_) => return false,
+        },
+        Err(_) => None,
     };
 
-    if let Some((tokens, count)) = cache.get_if_fresh(path, mtime_before) {
-        return write_back(state, path, tokens, count);
+    if let Some(mtime) = mtime_before {
+        if let Some((tokens, count)) = cache.get_if_fresh(path, mtime) {
+            return write_back(state, path, tokens, count);
+        }
     }
 
     let Some(adapter) = adapter_for_path(adapters, path).cloned() else {
         return false;
     };
+
+    // Virtual paths (e.g. OpenCode's .json stubs) have no real file on disk.
+    // Skip the metadata check for adapters that don't need it.
+    if mtime_before.is_none() && adapter.needs_fs_stat() {
+        return false;
+    }
+
     let parsed = match adapter.parse_meta_full(path).await {
         Ok(m) => m,
         Err(err) => {
@@ -185,18 +195,19 @@ async fn refresh_one(
     // value. Either way the token counts we hold are at least as fresh as
     // this post-parse mtime — keying the cache by it guarantees the next
     // fs_watch-triggered lookup matches.
-    let mtime_after = tokio::fs::metadata(path)
-        .await
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .unwrap_or(mtime_before);
-
-    cache.insert(
-        path.to_path_buf(),
-        mtime_after,
-        parsed.tokens.clone(),
-        parsed.message_count,
-    );
+    if let Some(mtime) = mtime_before {
+        let mtime_after = tokio::fs::metadata(path)
+            .await
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(mtime);
+        cache.insert(
+            path.to_path_buf(),
+            mtime_after,
+            parsed.tokens.clone(),
+            parsed.message_count,
+        );
+    }
     write_back(state, path, parsed.tokens, parsed.message_count)
 }
 

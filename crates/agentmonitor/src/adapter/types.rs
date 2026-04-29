@@ -69,7 +69,7 @@ pub struct SessionMeta {
 
 impl SessionMeta {
     pub fn short_id(&self) -> String {
-        let n = 8.min(self.id.len());
+        let n = 12.min(self.id.len());
         self.id[..n].to_string()
     }
 
@@ -90,6 +90,7 @@ pub fn agent_display_name(id: &str) -> &'static str {
         "claude" => "ClaudeCode",
         "claude-desktop" => "ClaudeDesktop",
         "codex" => "Codex",
+        "opencode" => "OpenCode",
         _ => "unknown",
     }
 }
