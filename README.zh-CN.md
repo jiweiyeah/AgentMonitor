@@ -18,6 +18,8 @@
 | [Claude Desktop](https://claude.ai/download) | `~/Library/Application Support/Claude-3p/local-agent-mode-sessions/` | macOS 本地 Agent 模式 |
 | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/**/rollout-*.jsonl` | CLI Agent |
 | [Codex App](https://github.com/openai/codex) | 同 Codex CLI | 桌面应用（`Codex.app`）会话 |
+| [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` | SQLite 数据库，使用虚拟会话路径 |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/<project_hash>/session-*.json` | 按项目目录组织的会话历史 |
 
 ## 功能特性
 
@@ -161,6 +163,8 @@ crates/agentmonitor/src/
     claude.rs          Claude Code JSONL schema
     claude_desktop.rs  Claude Desktop 本地 Agent 模式 schema
     codex.rs           Codex CLI & App rollout-*.jsonl schema
+    gemini.rs          Gemini CLI session-*.json schema
+    opencode.rs        OpenCode SQLite 适配器（虚拟路径）
     conversation.rs    共享对话事件模型
     types.rs           SessionMeta、TokenStats、MessagePreview
   collector/       后台数据源

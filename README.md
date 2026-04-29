@@ -18,6 +18,8 @@ A high-performance terminal UI for monitoring AI coding agent sessions in real t
 | [Claude Desktop](https://claude.ai/download) | `~/Library/Application Support/Claude-3p/local-agent-mode-sessions/` | macOS local agent mode |
 | [Codex CLI](https://github.com/openai/codex) | `~/.codex/sessions/**/rollout-*.jsonl` | CLI agent |
 | [Codex App](https://github.com/openai/codex) | Same as Codex CLI | Desktop app (`Codex.app`) sessions |
+| [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` | SQLite-backed; virtual session paths |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/<project_hash>/session-*.json` | Per-project chat history |
 
 ## Features
 
@@ -161,6 +163,8 @@ crates/agentmonitor/src/
     claude.rs          Claude Code JSONL schema
     claude_desktop.rs  Claude Desktop local-agent-mode schema
     codex.rs           Codex CLI & App rollout-*.jsonl schema
+    gemini.rs          Gemini CLI session-*.json schema
+    opencode.rs        OpenCode SQLite-backed adapter (virtual paths)
     conversation.rs    shared conversation event model
     types.rs           SessionMeta, TokenStats, MessagePreview
   collector/       background data sources
