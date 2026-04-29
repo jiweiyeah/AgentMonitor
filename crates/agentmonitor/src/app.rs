@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 
 use crate::adapter::conversation::ConversationEvent;
 use crate::adapter::types::{MessagePreview, SessionMeta, SessionStatus};
-use crate::adapter::{ClaudeAdapter, ClaudeDesktopAdapter, CodexAdapter, DynAdapter, OpencodeAdapter};
+use crate::adapter::{ClaudeAdapter, ClaudeDesktopAdapter, CodexAdapter, DynAdapter, GeminiAdapter, OpencodeAdapter};
 use crate::collector::metrics::{MetricsStore, ProcessEntry};
 use crate::collector::token_refresh::TokenCache;
 use crate::config::Config;
@@ -444,6 +444,7 @@ impl App {
             Arc::new(ClaudeAdapter::new(config.claude_root.clone())),
             Arc::new(ClaudeDesktopAdapter::new(config.claude_desktop_root.clone())),
             Arc::new(CodexAdapter::new(config.codex_root.clone())),
+            Arc::new(GeminiAdapter::new(config.gemini_root.clone())),
             Arc::new(OpencodeAdapter::new(opencode_db)),
         ];
         let state = Arc::new(RwLock::new(AppState::default()));

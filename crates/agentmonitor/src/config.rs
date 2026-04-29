@@ -9,6 +9,7 @@ pub struct Config {
     pub claude_root: Option<PathBuf>,
     pub claude_desktop_root: Option<PathBuf>,
     pub codex_root: Option<PathBuf>,
+    pub gemini_root: Option<PathBuf>,
     pub opencode_root: Option<PathBuf>,
 }
 
@@ -26,6 +27,7 @@ impl Default for Config {
                     .join("local-agent-mode-sessions")
             }),
             codex_root: home.as_ref().map(|h| h.join(".codex").join("sessions")),
+            gemini_root: home.as_ref().map(|h| h.join(".gemini").join("tmp")),
             opencode_root: home.as_ref().map(|h| {
                 h.join(".local")
                     .join("share")

@@ -90,6 +90,7 @@ pub fn agent_display_name(id: &str) -> &'static str {
         "claude" => "ClaudeCode",
         "claude-desktop" => "ClaudeDesktop",
         "codex" => "Codex",
+        "gemini" => "Gemini",
         "opencode" => "OpenCode",
         _ => "unknown",
     }
