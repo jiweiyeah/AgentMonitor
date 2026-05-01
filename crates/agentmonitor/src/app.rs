@@ -9,6 +9,7 @@ use tokio::sync::Notify;
 use crate::adapter::conversation::ConversationEvent;
 use crate::adapter::types::{MessagePreview, SessionMeta, SessionStatus};
 use crate::adapter::{ClaudeAdapter, ClaudeDesktopAdapter, CodexAdapter, DynAdapter, GeminiAdapter, HermesAdapter, OpencodeAdapter};
+use crate::collector::diagnostics::DiagnosticsStore;
 use crate::collector::metrics::{MetricsStore, ProcessEntry};
 use crate::collector::token_refresh::TokenCache;
 use crate::collector::token_trend::TokenTrend;
@@ -564,6 +565,11 @@ pub struct App {
     /// `token_refresh::write_back` after every accepted update; consumed by
     /// the Dashboard's tokens-per-minute sparkline.
     pub token_trend: Arc<TokenTrend>,
+    /// Lightweight runtime instrumentation for the collector pipeline.
+    /// Surfaced on the Settings tab's Diagnostics section so we (and bug
+    /// reporters) can see how often token_refresh runs, the cache hit rate,
+    /// and the fs_watch debounce ratio without a debug build.
+    pub diagnostics: Arc<DiagnosticsStore>,
     /// Render-trigger signal. Any task that mutates `state` should call
     /// `dirty.notify_one()` afterward so the next frame paints. Lives on
     /// `App` so spawned-and-detached tasks (e.g. async `gh api` calls in
@@ -591,6 +597,7 @@ impl App {
         let metrics = Arc::new(MetricsStore::new(config.metrics_capacity));
         let token_cache = Arc::new(TokenCache::new());
         let token_trend = Arc::new(TokenTrend::default());
+        let diagnostics = Arc::new(DiagnosticsStore::new());
         let dirty = Arc::new(Notify::new());
         let token_dirty = Arc::new(Notify::new());
         let app = Self {
@@ -614,6 +621,7 @@ impl App {
             keybinding_conflict: None,
             token_cache,
             token_trend,
+            diagnostics,
             dirty,
             token_dirty,
         };

@@ -146,6 +146,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(4),
+            Constraint::Length(7),
             Constraint::Length(3),
         ])
         .split(area);
@@ -232,6 +233,59 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, chunks[1], &mut list_state);
 
+    // Diagnostics panel — read-only snapshot of collector counters. Helps
+    // when triaging "tokens look frozen" reports without needing --debug
+    // logs. The raw atomics are loaded once into a snapshot struct so the
+    // five values that share lock cycles look consistent on the screen.
+    let diag = app.diagnostics.snapshot();
+    let avg_ms = diag.token_refresh_avg_ms();
+    let cache_pct = diag.token_cache_hit_rate() * 100.0;
+    let debounce_pct = diag.fs_watch_debounce_ratio() * 100.0;
+    let diagnostics_lines = vec![
+        Line::from(vec![
+            Span::styled(t("settings.diagnostics.title"), theme::title()),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                pad_display_width(t("settings.diagnostics.token_refresh"), 28),
+                theme::muted(),
+            ),
+            Span::raw(format!(
+                "{} passes · avg {:.1}ms · {} writes",
+                diag.token_refresh_passes, avg_ms, diag.token_refresh_writes,
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                pad_display_width(t("settings.diagnostics.token_cache"), 28),
+                theme::muted(),
+            ),
+            Span::raw(format!(
+                "{:.0}% hits ({}/{})",
+                cache_pct,
+                diag.token_cache_hits,
+                diag.token_cache_hits + diag.token_cache_misses,
+            )),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                pad_display_width(t("settings.diagnostics.fs_watch"), 28),
+                theme::muted(),
+            ),
+            Span::raw(format!(
+                "{} events → {} processed ({:.0}% past debounce) · {} reconciles",
+                diag.fs_watch_events,
+                diag.fs_watch_paths_processed,
+                debounce_pct,
+                diag.fs_watch_reconciles,
+            )),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(diagnostics_lines).block(Block::default().borders(Borders::TOP)),
+        chunks[2],
+    );
+
     // Footer note — tiny reminder that one field behaves differently (sample
     // interval takes effect after restart), plus a generic save confirmation.
     let notes = Paragraph::new(vec![
@@ -240,7 +294,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(Span::styled(t("settings.note_interval"), theme::muted())),
     ])
     .block(Block::default().borders(Borders::TOP));
-    frame.render_widget(notes, chunks[2]);
+    frame.render_widget(notes, chunks[3]);
 }
 
 fn render_keybindings(frame: &mut Frame, area: Rect, app: &App) {

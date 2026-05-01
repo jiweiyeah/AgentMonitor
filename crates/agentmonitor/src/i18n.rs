@@ -218,6 +218,10 @@ fn t_en(key: &str) -> &'static str {
         "settings.off" => "off",
         "settings.note_interval" => "Sampling interval changes take effect after restart.",
         "settings.note_theme" => "Theme and language apply instantly.",
+        "settings.diagnostics.title" => " Diagnostics ",
+        "settings.diagnostics.token_refresh" => "Token refresh",
+        "settings.diagnostics.token_cache" => "Token cache",
+        "settings.diagnostics.fs_watch" => "FS watcher",
 
         // ── Process ─────────────────────────────────────
         "process.title" => " Live Processes ",
@@ -422,6 +426,10 @@ fn t_zh(key: &str) -> Option<&'static str> {
         "settings.off" => "关",
         "settings.note_interval" => "采样间隔需要重启后生效。",
         "settings.note_theme" => "主题与语言即时生效。",
+        "settings.diagnostics.title" => " 运行指标 ",
+        "settings.diagnostics.token_refresh" => "Token 刷新",
+        "settings.diagnostics.token_cache" => "Token 缓存",
+        "settings.diagnostics.fs_watch" => "FS 监听",
 
         "process.title" => " 活跃进程 ",
         "process.no_live" => "当前没有 Claude/Codex 进程在运行。",

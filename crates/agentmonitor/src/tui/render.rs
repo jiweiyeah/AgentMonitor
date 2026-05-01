@@ -396,6 +396,7 @@ mod tests {
             keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
             token_trend: Arc::new(crate::collector::token_trend::TokenTrend::default()),
+            diagnostics: Arc::new(crate::collector::diagnostics::DiagnosticsStore::new()),
             dirty: Arc::new(tokio::sync::Notify::new()),
             token_dirty: Arc::new(tokio::sync::Notify::new()),
         }

@@ -23,6 +23,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::adapter::types::{SessionMeta, TokenStats};
 use crate::adapter::DynAdapter;
 use crate::app::AppState;
+use crate::collector::diagnostics::DiagnosticsStore;
 use crate::collector::token_refresh::TokenCache;
 
 /// How long a path must stay quiet (no new Modify events) before we re-parse
@@ -42,17 +43,20 @@ pub async fn run(
     token_dirty: Arc<Notify>,
     dirty: Arc<Notify>,
 ) {
-    run_with_cache(adapters, state, None, token_dirty, dirty).await
+    run_with_cache(adapters, state, None, None, token_dirty, dirty).await
 }
 
 /// Variant that also has a `TokenCache` handle so reconcile can prune cache
 /// entries for sessions that have disappeared without an explicit Remove
-/// event (CLAUDE.md §12 / unbounded growth concern). Kept as a separate
-/// entry point so existing callers in tests don't need a cache argument.
+/// event (CLAUDE.md §12 / unbounded growth concern), and an optional
+/// `DiagnosticsStore` for the Settings tab's runtime instrumentation panel.
+/// Kept as a separate entry point so existing callers in tests don't need
+/// the extra arguments.
 pub async fn run_with_cache(
     adapters: Vec<DynAdapter>,
     state: Arc<RwLock<AppState>>,
     cache: Option<Arc<TokenCache>>,
+    diagnostics: Option<Arc<DiagnosticsStore>>,
     token_dirty: Arc<Notify>,
     dirty: Arc<Notify>,
 ) {
@@ -101,6 +105,9 @@ pub async fn run_with_cache(
     loop {
         tokio::select! {
             Some(event) = ev_rx.recv() => {
+                if let Some(d) = diagnostics.as_ref() {
+                    d.record_fs_event();
+                }
                 // Remove fires immediately — it's idempotent and we want the
                 // session gone from the UI right now. Create/Modify go into
                 // the debounce queue.
@@ -132,6 +139,9 @@ pub async fn run_with_cache(
                 }
                 let mut any = false;
                 for path in ready {
+                    if let Some(d) = diagnostics.as_ref() {
+                        d.record_fs_path_processed();
+                    }
                     if update_for_path(path, &adapters, &state).await {
                         any = true;
                     }
@@ -142,6 +152,9 @@ pub async fn run_with_cache(
                 }
             }
             _ = reconcile.tick() => {
+                if let Some(d) = diagnostics.as_ref() {
+                    d.record_fs_reconcile();
+                }
                 let mut fresh = Vec::new();
                 for adapter in &adapters {
                     if let Ok(mut batch) = adapter.scan_all().await {

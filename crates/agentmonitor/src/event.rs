@@ -59,16 +59,26 @@ pub async fn run_event_loop(
     let adapters_fs = app.adapters.clone();
     let state_fs = state.clone();
     let cache_fs = app.token_cache.clone();
+    let diagnostics_fs = app.diagnostics.clone();
     let dirty_fs = dirty.clone();
     let token_dirty_fs = token_dirty.clone();
     tokio::spawn(async move {
-        fs_watch::run_with_cache(adapters_fs, state_fs, Some(cache_fs), token_dirty_fs, dirty_fs).await;
+        fs_watch::run_with_cache(
+            adapters_fs,
+            state_fs,
+            Some(cache_fs),
+            Some(diagnostics_fs),
+            token_dirty_fs,
+            dirty_fs,
+        )
+        .await;
     });
 
     let adapters_tok = app.adapters.clone();
     let state_tok = state.clone();
     let cache_tok = app.token_cache.clone();
     let trend_tok = app.token_trend.clone();
+    let diagnostics_tok = app.diagnostics.clone();
     let dirty_tok = dirty.clone();
     let token_dirty_tok = token_dirty.clone();
     tokio::spawn(async move {
@@ -77,6 +87,7 @@ pub async fn run_event_loop(
             state_tok,
             cache_tok,
             trend_tok,
+            diagnostics_tok,
             token_dirty_tok,
             dirty_tok,
         )
@@ -1526,6 +1537,7 @@ mod tests {
             keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
             token_trend: Arc::new(crate::collector::token_trend::TokenTrend::default()),
+            diagnostics: Arc::new(crate::collector::diagnostics::DiagnosticsStore::new()),
             dirty: Arc::new(Notify::new()),
             token_dirty: Arc::new(Notify::new()),
         }
@@ -2281,6 +2293,7 @@ mod tests {
             keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
             token_trend: Arc::new(crate::collector::token_trend::TokenTrend::default()),
+            diagnostics: Arc::new(crate::collector::diagnostics::DiagnosticsStore::new()),
             dirty: Arc::new(Notify::new()),
             token_dirty: Arc::new(Notify::new()),
         };

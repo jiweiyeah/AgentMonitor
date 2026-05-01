@@ -29,6 +29,7 @@ use tokio::sync::Notify;
 
 use agentmonitor::adapter::{ClaudeAdapter, DynAdapter};
 use agentmonitor::app::AppState;
+use agentmonitor::collector::diagnostics::DiagnosticsStore;
 use agentmonitor::collector::token_refresh::TokenCache;
 use agentmonitor::collector::token_trend::TokenTrend;
 use agentmonitor::collector::{fs_watch, token_refresh};
@@ -162,10 +163,12 @@ async fn harness() -> (Harness, tempfile::TempDir) {
         let state = state.clone();
         let cache = token_cache.clone();
         let trend = token_trend.clone();
+        let diagnostics = Arc::new(DiagnosticsStore::new());
         let dirty = dirty.clone();
         let token_dirty = token_dirty.clone();
         tokio::spawn(async move {
-            token_refresh::run(adapters, state, cache, trend, token_dirty, dirty).await;
+            token_refresh::run(adapters, state, cache, trend, diagnostics, token_dirty, dirty)
+                .await;
         });
     }
 

@@ -31,6 +31,7 @@ use tokio::time::interval;
 use crate::adapter::types::TokenStats;
 use crate::adapter::{adapter_for_path, DynAdapter};
 use crate::app::AppState;
+use crate::collector::diagnostics::DiagnosticsStore;
 use crate::collector::token_trend::TokenTrend;
 
 const CONCURRENCY: usize = 16;
@@ -132,15 +133,18 @@ pub async fn run(
     state: Arc<RwLock<AppState>>,
     cache: Arc<TokenCache>,
     trend: Arc<TokenTrend>,
+    diagnostics: Arc<DiagnosticsStore>,
     token_dirty: Arc<Notify>,
     dirty: Arc<Notify>,
 ) {
     tracing::info!("token_refresh: starting, first-pass sweep begins");
     let t0 = std::time::Instant::now();
-    let updated = refresh_all(&adapters, &state, &cache, &trend).await;
+    let updated = refresh_all(&adapters, &state, &cache, &trend, &diagnostics).await;
+    let elapsed = t0.elapsed().as_millis() as u64;
+    diagnostics.record_token_refresh_pass(elapsed, updated);
     tracing::info!(
         updated,
-        elapsed_ms = t0.elapsed().as_millis() as u64,
+        elapsed_ms = elapsed,
         "token_refresh: first pass done"
     );
     if updated > 0 {
@@ -159,12 +163,14 @@ pub async fn run(
             _ = token_dirty.notified() => "signal",
         };
         let t0 = std::time::Instant::now();
-        let updated = refresh_all(&adapters, &state, &cache, &trend).await;
+        let updated = refresh_all(&adapters, &state, &cache, &trend, &diagnostics).await;
+        let elapsed = t0.elapsed().as_millis() as u64;
+        diagnostics.record_token_refresh_pass(elapsed, updated);
         if updated > 0 {
             tracing::info!(
                 reason,
                 updated,
-                elapsed_ms = t0.elapsed().as_millis() as u64,
+                elapsed_ms = elapsed,
                 "token_refresh: pass done"
             );
             dirty.notify_one();
@@ -179,6 +185,7 @@ async fn refresh_all(
     state: &Arc<RwLock<AppState>>,
     cache: &TokenCache,
     trend: &TokenTrend,
+    diagnostics: &DiagnosticsStore,
 ) -> usize {
     let paths: Vec<PathBuf> = state
         .read()
@@ -188,7 +195,9 @@ async fn refresh_all(
         .collect();
 
     let count = stream::iter(paths)
-        .map(|path| async move { usize::from(refresh_one(adapters, state, cache, &path).await) })
+        .map(|path| async move {
+            usize::from(refresh_one(adapters, state, cache, diagnostics, &path).await)
+        })
         .buffer_unordered(CONCURRENCY)
         .fold(0usize, |acc, n| async move { acc + n })
         .await;
@@ -213,6 +222,7 @@ async fn refresh_one(
     adapters: &[DynAdapter],
     state: &Arc<RwLock<AppState>>,
     cache: &TokenCache,
+    diagnostics: &DiagnosticsStore,
     path: &Path,
 ) -> bool {
     // Pre-parse stat: lets us short-circuit on cache hits without touching
@@ -230,10 +240,12 @@ async fn refresh_one(
 
     if let Some(mtime) = mtime_before {
         if let Some((tokens, count)) = cache.get_if_fresh(path, mtime) {
+            diagnostics.record_cache_hit();
             return write_back(state, path, tokens, count);
         }
     }
 
+    diagnostics.record_cache_miss();
     let Some(adapter) = adapter_for_path(adapters, path).cloned() else {
         return false;
     };
