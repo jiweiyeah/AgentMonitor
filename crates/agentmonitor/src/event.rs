@@ -796,6 +796,16 @@ fn handle_viewer(code: KeyCode, modifiers: KeyModifiers, app: &mut App, path: &P
         handle_viewer_search_input(code, modifiers, app);
         return false;
     }
+    // Clear any transient toast (export/copy feedback) before processing the
+    // next key, mirroring `handle_normal`. Without this, the banner from the
+    // previous action would linger past the next keystroke.
+    {
+        let mut state = app.state.write();
+        if state.toast.is_some() {
+            state.toast = None;
+            state.dirty = true;
+        }
+    }
     match (code, modifiers) {
         (code, modifiers) if key_matches(KeyAction::ViewerSearchCancel, code, modifiers)
             && viewer_has_active_search(app) =>

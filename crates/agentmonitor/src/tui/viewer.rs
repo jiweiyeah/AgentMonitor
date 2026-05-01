@@ -78,16 +78,23 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     };
     let search_h = if has_search { 1 } else { 0 };
 
+    // Toast banner sits between the header and the search bar (or body) so
+    // export/copy feedback is visible inside the viewer instead of being
+    // hidden behind it on the parent screen.
+    let has_toast = app.state.read().toast.is_some();
+    let toast_h = if has_toast { 1 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),
+            Constraint::Length(toast_h),
             Constraint::Length(search_h),
             Constraint::Min(3),
             Constraint::Length(footer_h),
         ])
         .split(area);
-    let body_h = chunks[2].height.saturating_sub(2) as usize;
+    let body_h = chunks[3].height.saturating_sub(2) as usize;
 
     // Read the cache once, build lines if needed, and compute clipped scroll
     // + total lines while we still hold the read lock. Everything after this
@@ -97,11 +104,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let (visible, clipped_scroll, total_lines) = build_visible(cache, &path, body_h);
 
     render_header(frame, chunks[0], meta.as_ref(), cache);
-    if has_search {
-        render_search_bar(frame, chunks[1], cache);
+    if has_toast {
+        if let Some(toast) = state.toast.as_ref() {
+            render_toast(frame, chunks[1], toast);
+        }
     }
-    render_body(frame, chunks[2], cache, visible);
-    render_footer(frame, chunks[3], &footer_lines);
+    if has_search {
+        render_search_bar(frame, chunks[2], cache);
+    }
+    render_body(frame, chunks[3], cache, visible);
+    render_footer(frame, chunks[4], &footer_lines);
     drop(state);
 
     // Sync geometry + clipped scroll back so the event handler's bounds math
@@ -116,6 +128,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
     }
+}
+
+fn render_toast(frame: &mut Frame, area: Rect, toast: &str) {
+    let line = Line::from(vec![
+        Span::styled(" ⭐ ", Style::default().fg(Color::Yellow)),
+        Span::styled(toast.to_string(), Style::default().fg(Color::White)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).style(Style::default().bg(Color::DarkGray)),
+        area,
+    );
 }
 
 fn build_visible(
@@ -245,6 +268,7 @@ fn render_search_bar(frame: &mut Frame, area: Rect, cache: Option<&ConversationC
     let Some(search) = cache.search.as_ref() else {
         return;
     };
+    let kb = settings::get().keybindings;
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
     spans.push(Span::styled(
         format!(" {} ", t("viewer.search.prompt")),
@@ -288,6 +312,19 @@ fn render_search_bar(frame: &mut Frame, area: Rect, cache: Option<&ConversationC
             ),
             theme::muted(),
         ));
+        // Hint how to step between matches once committed — without this the
+        // user has to guess that `N` is the reverse of `n`.
+        if !search.editing {
+            spans.push(Span::styled(
+                format!(
+                    "  · {}/{} {}",
+                    kb.binding_display(KeyAction::ViewerSearchNext),
+                    kb.binding_display(KeyAction::ViewerSearchPrev),
+                    t("footer.search_next_prev"),
+                ),
+                theme::muted(),
+            ));
+        }
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -429,6 +466,17 @@ fn build_footer_lines(
         ]
     };
 
+    // Search next/prev share one chip so users see both `n` and `N` at once
+    // — showing only one binding made it unclear how to step backwards.
+    let search_next_prev_chip: Vec<Span<'static>> = vec![
+        Span::raw(format!(
+            " {}/{} ",
+            kb.binding_display(KeyAction::ViewerSearchNext),
+            kb.binding_display(KeyAction::ViewerSearchPrev),
+        )),
+        Span::styled(t("footer.search_next_prev").to_string(), theme::muted()),
+    ];
+
     let chips: Vec<Vec<Span<'static>>> = vec![
         chip(KeyAction::ViewerBack, "footer.back"),
         chip(KeyAction::ViewerScrollDown, "footer.scroll"),
@@ -436,7 +484,7 @@ fn build_footer_lines(
         chip(KeyAction::ViewerTop, "footer.top_bottom"),
         chip(KeyAction::ViewerExpand, "footer.expand_collapse"),
         chip(KeyAction::ViewerSearchStart, "footer.search"),
-        chip(KeyAction::ViewerSearchNext, "footer.search_next_prev"),
+        search_next_prev_chip,
         chip(KeyAction::ViewerResume, "footer.resume"),
         chip(KeyAction::ViewerDelete, "footer.delete"),
         // Status chip — last so it rides whichever line still has room.

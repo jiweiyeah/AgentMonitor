@@ -589,10 +589,7 @@ pub fn default_bindings(action: KeyAction) -> Vec<KeyBinding> {
         KeyAction::SettingsCancel => vec![KeyBinding::plain(KeyCodeSpec::Esc)],
         KeyAction::SettingsClearKeybinding => vec![KeyBinding::plain(KeyCodeSpec::Backspace)],
         KeyAction::SettingsResetAllKeybindings => vec![KeyBinding::plain(KeyCodeSpec::Char('R'))],
-        KeyAction::ViewerBack => vec![
-            KeyBinding::plain(KeyCodeSpec::Esc),
-            KeyBinding::plain(KeyCodeSpec::Char('q')),
-        ],
+        KeyAction::ViewerBack => vec![KeyBinding::plain(KeyCodeSpec::Esc)],
         KeyAction::ViewerScrollDown => vec![
             KeyBinding::plain(KeyCodeSpec::Char('j')),
             KeyBinding::plain(KeyCodeSpec::Down),
