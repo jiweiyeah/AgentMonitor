@@ -953,6 +953,7 @@ fn resume_session(app: &App) {
     let cmd = match meta.agent {
         "claude" => format!("claude --resume {}", meta.id),
         "codex" => format!("codex resume {}", meta.id),
+        "hermes" => format!("hermes --resume {}", meta.id),
         _ => return,
     };
 
@@ -986,6 +987,7 @@ fn resume_session_from_viewer(app: &App, viewer_path: &Path) {
     let cmd = match meta.agent {
         "claude" => format!("claude --resume {}", meta.id),
         "codex" => format!("codex resume {}", meta.id),
+        "hermes" => format!("hermes --resume {}", meta.id),
         _ => return,
     };
 
@@ -1372,6 +1374,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: None,
             message_count: 0,
@@ -1420,6 +1424,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: None,
             message_count: 0,
@@ -1472,6 +1478,8 @@ mod tests {
                 model: None,
                 version: None,
                 git_branch: None,
+
+                source: None,
                 started_at: None,
                 updated_at: None,
                 message_count: 0,
@@ -1532,6 +1540,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: None,
             message_count: 1,
@@ -1606,6 +1616,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: None,
             message_count: 1,
@@ -1689,6 +1701,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: None,
             message_count: 1,
@@ -1745,6 +1759,8 @@ mod tests {
                 model: None,
                 version: None,
                 git_branch: None,
+
+                source: None,
                 started_at: None,
                 updated_at: None,
                 message_count: 1,
@@ -1867,6 +1883,8 @@ mod tests {
                     model: Some("openai".into()),
                     version: Some("0.125.0-alpha.3".into()),
                     git_branch: None,
+
+                    source: None,
                     started_at: None,
                     updated_at: None,
                     message_count: 0,

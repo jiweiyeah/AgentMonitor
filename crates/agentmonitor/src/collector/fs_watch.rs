@@ -308,6 +308,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: None,
             message_count: msg_count,

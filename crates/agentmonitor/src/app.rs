@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 
 use crate::adapter::conversation::ConversationEvent;
 use crate::adapter::types::{MessagePreview, SessionMeta, SessionStatus};
-use crate::adapter::{ClaudeAdapter, ClaudeDesktopAdapter, CodexAdapter, DynAdapter, GeminiAdapter, OpencodeAdapter};
+use crate::adapter::{ClaudeAdapter, ClaudeDesktopAdapter, CodexAdapter, DynAdapter, GeminiAdapter, HermesAdapter, OpencodeAdapter};
 use crate::collector::metrics::{MetricsStore, ProcessEntry};
 use crate::collector::token_refresh::TokenCache;
 use crate::config::Config;
@@ -440,11 +440,13 @@ pub struct App {
 impl App {
     pub async fn new(config: Config) -> Result<Self> {
         let opencode_db = config.opencode_root.as_ref().map(|r| r.join("opencode.db"));
+        let hermes_db = config.hermes_root.as_ref().map(|r| r.join("state.db"));
         let adapters: Vec<DynAdapter> = vec![
             Arc::new(ClaudeAdapter::new(config.claude_root.clone())),
             Arc::new(ClaudeDesktopAdapter::new(config.claude_desktop_root.clone())),
             Arc::new(CodexAdapter::new(config.codex_root.clone())),
             Arc::new(GeminiAdapter::new(config.gemini_root.clone())),
+            Arc::new(HermesAdapter::new(hermes_db)),
             Arc::new(OpencodeAdapter::new(opencode_db)),
         ];
         let state = Arc::new(RwLock::new(AppState::default()));
@@ -591,6 +593,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: Some(now - chrono::Duration::minutes(f.updated_minutes_ago)),
             message_count: f.msgs,

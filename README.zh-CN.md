@@ -20,6 +20,7 @@
 | [Codex App](https://github.com/openai/codex) | 同 Codex CLI | 桌面应用（`Codex.app`）会话 |
 | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` | SQLite 数据库，使用虚拟会话路径 |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/<project_hash>/session-*.json` | 按项目目录组织的会话历史 |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `~/.hermes/state.db` | SQLite 数据库，使用虚拟会话路径 |
 
 ## 功能特性
 
@@ -164,6 +165,7 @@ crates/agentmonitor/src/
     claude_desktop.rs  Claude Desktop 本地 Agent 模式 schema
     codex.rs           Codex CLI & App rollout-*.jsonl schema
     gemini.rs          Gemini CLI session-*.json schema
+    hermes.rs          Hermes Agent SQLite 适配器（虚拟路径）
     opencode.rs        OpenCode SQLite 适配器（虚拟路径）
     conversation.rs    共享对话事件模型
     types.rs           SessionMeta、TokenStats、MessagePreview

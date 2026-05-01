@@ -20,6 +20,7 @@ A high-performance terminal UI for monitoring AI coding agent sessions in real t
 | [Codex App](https://github.com/openai/codex) | Same as Codex CLI | Desktop app (`Codex.app`) sessions |
 | [OpenCode](https://github.com/sst/opencode) | `~/.local/share/opencode/opencode.db` | SQLite-backed; virtual session paths |
 | [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `~/.gemini/tmp/<project_hash>/session-*.json` | Per-project chat history |
+| [Hermes Agent](https://github.com/NousResearch/hermes-agent) | `~/.hermes/state.db` | SQLite-backed; virtual session paths |
 
 ## Features
 
@@ -164,6 +165,7 @@ crates/agentmonitor/src/
     claude_desktop.rs  Claude Desktop local-agent-mode schema
     codex.rs           Codex CLI & App rollout-*.jsonl schema
     gemini.rs          Gemini CLI session-*.json schema
+    hermes.rs          Hermes Agent SQLite-backed adapter (virtual paths)
     opencode.rs        OpenCode SQLite-backed adapter (virtual paths)
     conversation.rs    shared conversation event model
     types.rs           SessionMeta, TokenStats, MessagePreview

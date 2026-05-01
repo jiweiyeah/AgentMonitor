@@ -30,6 +30,7 @@ impl CodexAdapter {
             model: None,
             version: None,
             git_branch: None,
+            source: None,
             started_at: None,
             updated_at: mtime,
             message_count: 0,
@@ -635,6 +636,8 @@ mod tests {
             model: None,
             version: None,
             git_branch: None,
+
+            source: None,
             started_at: None,
             updated_at: None,
             message_count: 0,

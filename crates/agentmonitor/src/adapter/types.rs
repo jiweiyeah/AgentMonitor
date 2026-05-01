@@ -58,6 +58,10 @@ pub struct SessionMeta {
     pub model: Option<String>,
     pub version: Option<String>,
     pub git_branch: Option<String>,
+    /// Platform/source label for agents that don't bind sessions to a working
+    /// directory. Hermes records this as `cli` / `telegram` / `discord` / etc.
+    /// in `state.db`. None for filesystem-rooted agents (claude/codex/...).
+    pub source: Option<String>,
     pub started_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
     pub message_count: usize,
@@ -74,10 +78,18 @@ impl SessionMeta {
     }
 
     pub fn cwd_display(&self) -> String {
-        self.cwd
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "?".into())
+        if let Some(p) = &self.cwd {
+            return p.display().to_string();
+        }
+        // Hermes has no cwd column on its sessions row — show the platform
+        // tag (cli/telegram/discord/...) in the cwd slot so the user sees
+        // *something* meaningful. Wrapped in 〈〉 to flag "this is not a
+        // path", which prevents the value from being mistaken for a real
+        // directory anywhere it gets shortened or truncated.
+        if let Some(src) = &self.source {
+            return format!("〈{}〉", src);
+        }
+        "?".into()
     }
 
     pub fn agent_label(&self) -> &'static str {
@@ -91,6 +103,7 @@ pub fn agent_display_name(id: &str) -> &'static str {
         "claude-desktop" => "ClaudeDesktop",
         "codex" => "Codex",
         "gemini" => "Gemini",
+        "hermes" => "Hermes",
         "opencode" => "OpenCode",
         _ => "unknown",
     }
