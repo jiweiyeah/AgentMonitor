@@ -12,18 +12,28 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use parking_lot::RwLock;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::Notify;
-use tokio::time::{interval, sleep};
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::adapter::types::{SessionMeta, TokenStats};
 use crate::adapter::DynAdapter;
 use crate::app::AppState;
 use crate::collector::token_refresh::TokenCache;
+
+/// How long a path must stay quiet (no new Modify events) before we re-parse
+/// it. Tuned to absorb a typical editor's "burst write" without making the
+/// dashboard feel laggy on real changes.
+const DEBOUNCE_QUIET: Duration = Duration::from_millis(50);
+/// How often we sweep the pending map looking for paths that have hit their
+/// quiet window. Should be small enough that a single `Modify` doesn't sit
+/// in the queue much longer than `DEBOUNCE_QUIET`, but large enough that
+/// idle minutes don't burn CPU on no-op sweeps.
+const DEBOUNCE_SWEEP: Duration = Duration::from_millis(30);
 
 /// Background task: owns a notify watcher + fallback ticker.
 pub async fn run(
@@ -79,14 +89,55 @@ pub async fn run_with_cache(
     let mut reconcile = interval(Duration::from_secs(10));
     reconcile.tick().await; // discard first immediate tick
 
+    // Path-aware debounce: a Modify event only inserts/refreshes a `last_seen`
+    // entry. The sweep ticker drains entries that have been quiet for
+    // `DEBOUNCE_QUIET`, processing each path exactly once regardless of how
+    // many notify events landed in that window. Cheaper than the old
+    // `sleep(50ms)` per event when an editor fires hundreds of bursts.
+    let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+    let mut sweep = interval(DEBOUNCE_SWEEP);
+    sweep.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             Some(event) = ev_rx.recv() => {
-                let changed = handle_event(event, &adapters, &state).await;
-                dirty.notify_one();
-                if changed {
-                    // A real file changed — ask token_refresh to recompute
-                    // immediately rather than waiting for its next tick.
+                // Remove fires immediately — it's idempotent and we want the
+                // session gone from the UI right now. Create/Modify go into
+                // the debounce queue.
+                let mut any_remove = false;
+                for path in event.paths {
+                    let path = normalize_fs_path(path);
+                    match event.kind {
+                        EventKind::Create(_) | EventKind::Modify(_) => {
+                            pending.insert(path, Instant::now());
+                        }
+                        EventKind::Remove(_) => {
+                            let mut s = state.write();
+                            if s.remove_session_path(&path) {
+                                any_remove = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if any_remove {
+                    dirty.notify_one();
+                    token_dirty.notify_one();
+                }
+            }
+            _ = sweep.tick() => {
+                let ready = drain_ready(&mut pending, DEBOUNCE_QUIET);
+                if ready.is_empty() {
+                    continue;
+                }
+                let mut any = false;
+                for path in ready {
+                    if update_for_path(path, &adapters, &state).await {
+                        any = true;
+                    }
+                }
+                if any {
+                    dirty.notify_one();
                     token_dirty.notify_one();
                 }
             }
@@ -116,36 +167,32 @@ pub async fn run_with_cache(
     }
 }
 
-/// Returns `true` if the event actually mutated `AppState.sessions`. The
-/// caller uses this to decide whether a token refresh is worth kicking off
-/// (pure noise events like metadata-only access shouldn't spin the refresher).
-async fn handle_event(ev: Event, adapters: &[DynAdapter], state: &Arc<RwLock<AppState>>) -> bool {
-    match ev.kind {
-        EventKind::Create(_) | EventKind::Modify(_) => {
-            let mut any = false;
-            for path in ev.paths {
-                let path = normalize_fs_path(path);
-                if update_for_path(path, adapters, state).await {
-                    any = true;
-                }
-            }
-            any
+/// Pull every path whose `last_seen` is at least `quiet` ago out of the
+/// pending map. Returned paths are removed from the map so they don't get
+/// re-processed. Pure function over the map so we can unit-test the timing
+/// math without standing up the whole watcher.
+pub(crate) fn drain_ready(
+    pending: &mut HashMap<PathBuf, Instant>,
+    quiet: Duration,
+) -> Vec<PathBuf> {
+    let now = Instant::now();
+    let mut ready = Vec::new();
+    pending.retain(|path, last_seen| {
+        if now.duration_since(*last_seen) >= quiet {
+            ready.push(path.clone());
+            false
+        } else {
+            true
         }
-        EventKind::Remove(_) => {
-            let mut any = false;
-            for path in ev.paths {
-                let path = normalize_fs_path(path);
-                let mut s = state.write();
-                if s.remove_session_path(&path) {
-                    any = true;
-                }
-            }
-            any
-        }
-        _ => false,
-    }
+    });
+    ready
 }
 
+/// Process one path that has been quiet long enough. The debounce / quiet
+/// window is now enforced at the call site via `drain_ready`; this function
+/// itself does no waiting. Returns `true` if it actually mutated state, so
+/// the caller can decide whether the dirty / token_dirty notifies are worth
+/// firing.
 async fn update_for_path(
     path: PathBuf,
     adapters: &[DynAdapter],
@@ -154,9 +201,6 @@ async fn update_for_path(
     let Some(adapter) = adapters.iter().find(|a| a.owns_path(&path)) else {
         return false;
     };
-    // Brief debounce: editors often fire multiple Modify events in quick
-    // succession. Sleep 50ms to coalesce the tail.
-    sleep(Duration::from_millis(50)).await;
     let meta = match adapter.parse_meta_fast(&path).await {
         Ok(m) => m,
         Err(err) => {
@@ -488,5 +532,45 @@ mod tests {
         // isn't actually under the firmlink boundary must not be rewritten.
         let p = PathBuf::from("/System/Volumes/Datastore/x");
         assert_eq!(normalize_fs_path(p.clone()), p);
+    }
+
+    #[test]
+    fn drain_ready_returns_only_paths_past_quiet_window() {
+        use std::time::Duration;
+        let quiet = Duration::from_millis(20);
+        let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+        let now = Instant::now();
+        // /a is old (50ms ago), /b is fresh (just now). Only /a should drain.
+        pending.insert(PathBuf::from("/a"), now - Duration::from_millis(50));
+        pending.insert(PathBuf::from("/b"), now);
+
+        let drained = drain_ready(&mut pending, quiet);
+        assert_eq!(drained, vec![PathBuf::from("/a")]);
+        assert_eq!(pending.len(), 1);
+        assert!(pending.contains_key(&PathBuf::from("/b")));
+    }
+
+    #[test]
+    fn drain_ready_dedups_bursts_into_one_path() {
+        // The whole point of the path-aware debounce: 100 modifies on the
+        // same path inside the quiet window must result in *one* drained
+        // entry, not 100. The map key uniqueness handles dedup; this test
+        // pins down that contract.
+        use std::time::Duration;
+        let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+        let stale = Instant::now() - Duration::from_millis(50);
+        for _ in 0..100 {
+            pending.insert(PathBuf::from("/burst"), stale);
+        }
+        let drained = drain_ready(&mut pending, Duration::from_millis(20));
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0], PathBuf::from("/burst"));
+    }
+
+    #[test]
+    fn drain_ready_empty_map_is_noop() {
+        let mut pending: HashMap<PathBuf, Instant> = HashMap::new();
+        let drained = drain_ready(&mut pending, std::time::Duration::from_millis(10));
+        assert!(drained.is_empty());
     }
 }
