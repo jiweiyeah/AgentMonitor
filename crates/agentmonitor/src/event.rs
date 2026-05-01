@@ -854,6 +854,12 @@ fn handle_viewer(code: KeyCode, modifiers: KeyModifiers, app: &mut App, path: &P
         (code, modifiers) if key_matches(KeyAction::ViewerSearchPrev, code, modifiers) => {
             advance_viewer_search(app, -1);
         }
+        (code, modifiers) if key_matches(KeyAction::ViewerExportMarkdown, code, modifiers) => {
+            export_viewer_session(app, path);
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerCopyToClipboard, code, modifiers) => {
+            copy_viewer_session(app, path);
+        }
         _ => {}
     }
     false
@@ -1000,6 +1006,78 @@ fn advance_viewer_search(app: &App, delta: i32) {
     let target = sr.matches[next] as u16;
     cache.scroll = target;
     s.dirty = true;
+}
+
+/// Snapshot the current viewer's events without holding the state read lock
+/// across the (potentially slow) markdown render. Returns None if the viewer
+/// is in an empty/error state.
+fn snapshot_viewer_events(app: &App, path: &Path) -> Option<(String, String, Vec<crate::adapter::conversation::ConversationEvent>)> {
+    let s = app.state.read();
+    let cache = s.conversation.as_ref()?;
+    if cache.path != path || cache.events.is_empty() {
+        return None;
+    }
+    let session = s.sessions.iter().find(|m| m.path == path)?;
+    Some((session.agent.to_string(), session.short_id(), cache.events.clone()))
+}
+
+/// `E` in viewer: render the current conversation as Markdown and write it
+/// to `~/Downloads/agent-monitor/<agent>-<short_id>.md`. Toast on completion.
+fn export_viewer_session(app: &App, path: &Path) {
+    let Some((agent, short_id, events)) = snapshot_viewer_events(app, path) else {
+        let mut s = app.state.write();
+        s.toast = Some("Nothing to export — viewer is empty".into());
+        s.dirty = true;
+        return;
+    };
+    let target = match crate::export::default_export_path(&agent, &short_id) {
+        Ok(p) => p,
+        Err(err) => {
+            tracing::warn!(?err, "export path build failed");
+            let mut s = app.state.write();
+            s.toast = Some(format!("Export failed: {err}"));
+            s.dirty = true;
+            return;
+        }
+    };
+    let md = crate::export::to_markdown(&events);
+    match crate::export::write_atomic(&target, &md) {
+        Ok(()) => {
+            let mut s = app.state.write();
+            s.toast = Some(format!("Exported to {}", target.display()));
+            s.dirty = true;
+        }
+        Err(err) => {
+            tracing::warn!(?err, target = %target.display(), "export write failed");
+            let mut s = app.state.write();
+            s.toast = Some(format!("Export failed: {err}"));
+            s.dirty = true;
+        }
+    }
+}
+
+/// `y` in viewer: render Markdown and pipe it to the platform clipboard tool.
+fn copy_viewer_session(app: &App, path: &Path) {
+    let Some((_, _, events)) = snapshot_viewer_events(app, path) else {
+        let mut s = app.state.write();
+        s.toast = Some("Nothing to copy — viewer is empty".into());
+        s.dirty = true;
+        return;
+    };
+    let md = crate::export::to_markdown(&events);
+    match crate::export::copy_to_clipboard(&md) {
+        Ok(()) => {
+            let mut s = app.state.write();
+            s.toast = Some(format!("Copied {} chars to clipboard", md.len()));
+            s.dirty = true;
+        }
+        Err(err) => {
+            tracing::warn!(?err, "clipboard copy failed");
+            let mut s = app.state.write();
+            s.toast = Some(format!("Copy failed: {err}"));
+            s.dirty = true;
+        }
+    }
 }
 
 fn handle_delete_confirm(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {

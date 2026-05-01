@@ -77,6 +77,8 @@ pub enum KeyAction {
     ViewerSearchNext,
     ViewerSearchPrev,
     ViewerSearchCancel,
+    ViewerExportMarkdown,
+    ViewerCopyToClipboard,
     DeleteCancel,
     DeleteConfirm,
     FilterCancel,
@@ -132,6 +134,8 @@ impl KeyAction {
             KeyAction::ViewerSearchNext,
             KeyAction::ViewerSearchPrev,
             KeyAction::ViewerSearchCancel,
+            KeyAction::ViewerExportMarkdown,
+            KeyAction::ViewerCopyToClipboard,
             KeyAction::DeleteCancel,
             KeyAction::DeleteConfirm,
             KeyAction::FilterCancel,
@@ -186,7 +190,9 @@ impl KeyAction {
             | KeyAction::ViewerSearchStart
             | KeyAction::ViewerSearchNext
             | KeyAction::ViewerSearchPrev
-            | KeyAction::ViewerSearchCancel => KeyContext::Viewer,
+            | KeyAction::ViewerSearchCancel
+            | KeyAction::ViewerExportMarkdown
+            | KeyAction::ViewerCopyToClipboard => KeyContext::Viewer,
             KeyAction::DeleteCancel => KeyContext::DeleteConfirm,
             KeyAction::DeleteConfirm => KeyContext::DeleteConfirm,
             KeyAction::FilterCancel | KeyAction::FilterApply | KeyAction::FilterDeleteChar => {
@@ -242,6 +248,8 @@ impl KeyAction {
             KeyAction::ViewerSearchNext => "key_action.viewer_search_next",
             KeyAction::ViewerSearchPrev => "key_action.viewer_search_prev",
             KeyAction::ViewerSearchCancel => "key_action.viewer_search_cancel",
+            KeyAction::ViewerExportMarkdown => "key_action.viewer_export_markdown",
+            KeyAction::ViewerCopyToClipboard => "key_action.viewer_copy_to_clipboard",
             KeyAction::DeleteCancel => "key_action.delete_cancel",
             KeyAction::DeleteConfirm => "key_action.delete_confirm",
             KeyAction::FilterCancel => "key_action.filter_cancel",
@@ -610,6 +618,8 @@ pub fn default_bindings(action: KeyAction) -> Vec<KeyBinding> {
         KeyAction::ViewerSearchNext => vec![KeyBinding::plain(KeyCodeSpec::Char('n'))],
         KeyAction::ViewerSearchPrev => vec![KeyBinding::plain(KeyCodeSpec::Char('N'))],
         KeyAction::ViewerSearchCancel => vec![KeyBinding::plain(KeyCodeSpec::Esc)],
+        KeyAction::ViewerExportMarkdown => vec![KeyBinding::plain(KeyCodeSpec::Char('E'))],
+        KeyAction::ViewerCopyToClipboard => vec![KeyBinding::plain(KeyCodeSpec::Char('y'))],
         KeyAction::DeleteCancel => vec![
             KeyBinding::plain(KeyCodeSpec::Esc),
             KeyBinding::plain(KeyCodeSpec::Char('q')),
