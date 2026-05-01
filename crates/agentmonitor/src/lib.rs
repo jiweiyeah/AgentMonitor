@@ -6,5 +6,6 @@ pub mod config;
 pub mod event;
 pub mod i18n;
 pub mod keybinding;
+pub mod pricing;
 pub mod settings;
 pub mod tui;

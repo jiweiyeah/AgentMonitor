@@ -12,11 +12,12 @@ use ratatui::Terminal;
 use crate::app::{App, Mode, Tab};
 use crate::i18n::t;
 use crate::settings::{self, KeyAction};
-use crate::tui::{dashboard, sessions, settings as settings_tab, theme, viewer};
+use crate::tui::{dashboard, help, sessions, settings as settings_tab, theme, viewer};
 
 /// Full-frame draw. Called on every input event and every `dirty` notify.
 pub async fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) -> Result<()> {
     let mode = app.state.read().mode.clone();
+    let show_help = app.state.read().show_help;
     terminal.draw(|frame| {
         let area = frame.area();
         match mode {
@@ -25,6 +26,9 @@ pub async fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &App) 
         }
         draw_delete_confirm(frame, area, app);
         draw_delete_footer(frame, area, app);
+        if show_help {
+            help::render(frame, area);
+        }
     })?;
     Ok(())
 }
@@ -383,12 +387,17 @@ mod tests {
             session_sort: crate::app::SessionSort::default(),
             delete_confirm: None,
             selected_process: 0,
+            selected_project: 0,
+            dashboard_cursor: crate::app::DashboardCursor::default(),
             selected_setting: 0,
             settings_keybindings_open: false,
             selected_keybinding: 0,
             capturing_keybinding: None,
             keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
+            token_trend: Arc::new(crate::collector::token_trend::TokenTrend::default()),
+            dirty: Arc::new(tokio::sync::Notify::new()),
+            token_dirty: Arc::new(tokio::sync::Notify::new()),
         }
     }
 

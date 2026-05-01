@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use crate::adapter::types::agent_display_name;
 use crate::app::App;
@@ -17,18 +18,9 @@ use crate::tui::stats::{
 };
 use crate::tui::theme;
 use crate::tui::widgets::{braille_spark, human_bytes, pad_display_width, trend_arrow};
+use crate::tui::{DASHBOARD_HSTACK_MIN_WIDTH, DASHBOARD_TOKENS_STRIP_MIN_HEIGHT};
 
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),                             // Overview
-            Constraint::Min(6),                                // Activity + Top projects row
-            Constraint::Min(4),                                // Live Processes table
-            Constraint::Length(4 + app.adapters.len() as u16), // Tokens-by-agent strip
-        ])
-        .split(area);
-
     let state = app.state.read();
     let sessions = state.sessions.clone();
     drop(state);
@@ -55,6 +47,42 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .map(|r| r.tokens.total_with_preference(include_cache))
         .sum();
+    let total_cost = crate::pricing::aggregate_cost(&sessions);
+
+    // Token trend buckets: 30 buckets of 1 minute = ~30 minutes of history,
+    // matching the rate caption window. The TokenTrend lives in App so it
+    // accumulates across renders without being re-derived from scratch.
+    let now_systime = SystemTime::now();
+    let trend_window = std::time::Duration::from_secs(60 * 30);
+    let token_buckets = app.token_trend.buckets(
+        now_systime,
+        std::time::Duration::from_secs(60),
+        30,
+    );
+    let token_window_total = app.token_trend.rate_in_window(now_systime, trend_window);
+    let has_trend = token_buckets.iter().any(|&v| v > 0);
+
+    // Overview height grows with the number of agent lines actually needed
+    // for this terminal width — one row per pack-line plus header/process/borders.
+    let overview_height = compute_overview_height(area.width, &agent_rows, has_trend);
+
+    // Responsive: short terminals drop the Tokens-by-agent strip from the
+    // bottom. Its detail (input/output/cache_r/cache_w split) is "advanced"
+    // info; per-agent counts live in the Overview row, and Σ tokens lives
+    // there too. Restoring it costs the user one keystroke (bigger window).
+    let show_tokens_strip = area.height >= DASHBOARD_TOKENS_STRIP_MIN_HEIGHT;
+    let mut constraints: Vec<Constraint> = vec![
+        Constraint::Length(overview_height), // Overview (responsive)
+        Constraint::Min(6),                  // Activity + Top projects row
+        Constraint::Min(4),                  // Live Processes table
+    ];
+    if show_tokens_strip {
+        constraints.push(Constraint::Length(4 + app.adapters.len() as u16));
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
 
     let procs = app.metrics.snapshot();
     let total_rss = app.metrics.total_rss_kb();
@@ -77,17 +105,32 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             last24h,
             agent_rows: &agent_rows,
             total_tokens,
+            total_cost,
             live_pids: procs.len(),
             total_rss_kb: total_rss,
             sample_interval_secs: app.config.sample_interval.as_secs(),
             rss_trend: &rss_trend,
+            token_trend: &token_buckets,
+            token_window_total,
+            token_window_label: "30m",
+            token_window_minutes: 30,
         },
     );
 
-    let middle = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(chunks[1]);
+    let middle = if chunks[1].width >= DASHBOARD_HSTACK_MIN_WIDTH {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+            .split(chunks[1])
+    } else {
+        // Narrow terminal: side-by-side compresses both panels (cwd column
+        // unreadable on Top Projects, bars too thin on Activity). Stack them
+        // vertically — each gets the full inner width.
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1])
+    };
 
     let hist = activity_buckets(&sessions, now, 24);
     render_activity(frame, middle[0], &hist, now);
@@ -95,11 +138,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     // Cap the list at what fits in the pane so the block never overflows.
     let top_n = middle[1].height.saturating_sub(3) as usize;
     let projects = top_projects(&sessions, top_n.max(1));
-    render_top_projects(frame, middle[1], &projects, now);
+    let project_focused =
+        app.dashboard_cursor == crate::app::DashboardCursor::Project;
+    let selected_project = if project_focused {
+        Some(app.selected_project.min(projects.len().saturating_sub(1)))
+    } else {
+        None
+    };
+    render_top_projects(frame, middle[1], &projects, now, selected_project);
 
     crate::tui::process::render(frame, chunks[2], app);
 
-    render_tokens_by_agent(frame, chunks[3], &agent_rows);
+    if show_tokens_strip {
+        render_tokens_by_agent(frame, chunks[3], &agent_rows);
+    }
 }
 
 struct OverviewData<'a> {
@@ -107,57 +159,130 @@ struct OverviewData<'a> {
     last24h: usize,
     agent_rows: &'a [AgentTokenRow],
     total_tokens: u64,
+    /// Aggregate USD cost across all sessions whose model is in the pricing
+    /// table. Sessions with unknown models contribute 0.
+    total_cost: f64,
     live_pids: usize,
     total_rss_kb: u64,
     sample_interval_secs: u64,
     rss_trend: &'a [u64],
+    /// Per-minute deltas from `TokenTrend::buckets`. Empty when no trend data
+    /// has been collected yet (first ~10s after launch). When non-empty,
+    /// rendered as a small braille sparkline next to Σ tokens.
+    token_trend: &'a [u64],
+    /// Tokens added in the last `token_window_label` window. Drives the
+    /// per-minute rate display.
+    token_window_total: u64,
+    /// Window label like "30m" / "1h" used in the rate caption.
+    token_window_label: &'a str,
+    /// Length of the rate window in minutes. Used to compute "X K/min".
+    token_window_minutes: u64,
 }
 
 fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
-    let agent_summary = if d.agent_rows.is_empty() {
-        "-".to_string()
-    } else {
-        d.agent_rows
-            .iter()
-            .map(|r| format!("{}={}", agent_display_name(r.agent), r.sessions))
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
+    let label_width = 10usize;
+    // Block borders eat 2 cols. Anything below that means we can't render
+    // anything meaningful — bail out gracefully via the same zero-budget path.
+    let inner_width = (area.width as usize).saturating_sub(2);
+    let agent_budget = inner_width.saturating_sub(label_width);
 
-    let lines = vec![
-        Line::from(vec![
+    let agent_packed = build_agent_lines(d.agent_rows, agent_budget);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            pad_display_width(t("dashboard.sessions"), label_width),
+            theme::muted(),
+        ),
+        bold(format!("{}", d.total_sessions)),
+        Span::styled(
+            format!("   {}", pad_display_width(t("dashboard.last24h"), label_width)),
+            theme::muted(),
+        ),
+        Span::styled(
+            format!("{}", d.last24h),
+            Style::default()
+                .fg(theme::SUCCESS)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("   {}  ", t("dashboard.total_tokens")),
+            theme::muted(),
+        ),
+        Span::styled(
+            format_token_count(d.total_tokens),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("   {}  ", t("dashboard.total_cost")),
+            theme::muted(),
+        ),
+        Span::styled(
+            format_cost(d.total_cost),
+            Style::default()
+                .fg(theme::SUCCESS)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Token trend row: sparkline + "Σ rate ≈ XX K/min · 30m" caption. Only
+    // shown once the trend has at least one non-zero bucket; before that the
+    // line is blank to avoid implying "0 tokens/min" when the truth is "we
+    // haven't measured yet".
+    let any_trend = d.token_trend.iter().any(|&v| v > 0);
+    if any_trend {
+        // Sparkline width: pack each pair of buckets into one braille char.
+        // 30 buckets → 15 chars, fits comfortably alongside the rate caption.
+        let spark = braille_spark(d.token_trend, 15);
+        let per_min = if d.token_window_minutes == 0 {
+            0
+        } else {
+            d.token_window_total / d.token_window_minutes
+        };
+        lines.push(Line::from(vec![
             Span::styled(
-                pad_display_width(t("dashboard.sessions"), 10),
+                pad_display_width(t("dashboard.rate"), label_width),
                 theme::muted(),
             ),
-            bold(format!("{}", d.total_sessions)),
             Span::styled(
-                format!("   {}", pad_display_width(t("dashboard.last24h"), 10)),
-                theme::muted(),
-            ),
-            Span::styled(
-                format!("{}", d.last24h),
-                Style::default()
-                    .fg(theme::SUCCESS)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("   {}  ", t("dashboard.total_tokens")),
-                theme::muted(),
-            ),
-            Span::styled(
-                format_token_count(d.total_tokens),
+                spark,
                 Style::default()
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ),
-        ]),
-        Line::from(vec![
-            Span::styled(pad_display_width(t("dashboard.agents"), 10), theme::muted()),
-            Span::raw(agent_summary),
-        ]),
-        Line::from(process_row_spans(&d)),
-    ];
+            Span::raw("  "),
+            Span::styled(
+                format!(
+                    "≈ {}/min  ({} {})",
+                    format_token_count(per_min),
+                    format_token_count(d.token_window_total),
+                    d.token_window_label,
+                ),
+                theme::muted(),
+            ),
+        ]));
+    }
+
+    for (i, spans) in agent_packed.into_iter().enumerate() {
+        let mut line_spans: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 1);
+        if i == 0 {
+            line_spans.push(Span::styled(
+                pad_display_width(t("dashboard.agents"), label_width),
+                theme::muted(),
+            ));
+        } else {
+            // Continuation rows: blank gutter the width of the label so the
+            // agent items stay vertically aligned with the first row.
+            line_spans.push(Span::raw(" ".repeat(label_width)));
+        }
+        line_spans.extend(spans);
+        lines.push(Line::from(line_spans));
+    }
+
+    lines.push(Line::from(process_row_spans(&d)));
 
     let widget = Paragraph::new(lines).block(
         Block::default()
@@ -165,6 +290,73 @@ fn render_overview(frame: &mut Frame, area: Rect, d: OverviewData<'_>) {
             .title(Span::styled(t("dashboard.overview"), theme::title())),
     );
     frame.render_widget(widget, area);
+}
+
+/// Pack agent rows into one or more visual lines fitting `width_budget` cols.
+/// Items use a two-space separator. When `width_budget` is too small to hold
+/// even a single item, we still emit one item per line — overflow is preferred
+/// to dropping data.
+fn build_agent_lines(rows: &[AgentTokenRow], width_budget: usize) -> Vec<Vec<Span<'static>>> {
+    if rows.is_empty() {
+        return vec![vec![Span::styled("-", theme::muted())]];
+    }
+
+    const SEP: &str = "  ";
+    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut current_w: usize = 0;
+
+    for r in rows {
+        let name = agent_display_name(r.agent);
+        let count = r.sessions.to_string();
+        let item_w = UnicodeWidthStr::width(name) + 1 + UnicodeWidthStr::width(count.as_str());
+        let need = if current.is_empty() {
+            item_w
+        } else {
+            current_w + SEP.len() + item_w
+        };
+        if need > width_budget && !current.is_empty() {
+            lines.push(std::mem::take(&mut current));
+            current_w = 0;
+        }
+        if !current.is_empty() {
+            current.push(Span::raw(SEP));
+            current_w += SEP.len();
+        }
+        current.push(Span::styled(
+            name.to_string(),
+            Style::default().fg(Color::White),
+        ));
+        current.push(Span::styled("=", theme::muted()));
+        current.push(Span::styled(
+            count,
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+        current_w += item_w;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Total height the Overview block needs at this terminal width: 2 borders +
+/// 1 sessions row + (optional 1 rate row) + N agent rows + 1 process row.
+/// Min 5 keeps behaviour identical to the legacy fixed layout when nothing
+/// wraps and there's no trend data yet.
+fn compute_overview_height(
+    area_width: u16,
+    rows: &[AgentTokenRow],
+    has_trend: bool,
+) -> u16 {
+    let label_width = 10usize;
+    let inner_width = (area_width as usize).saturating_sub(2);
+    let budget = inner_width.saturating_sub(label_width);
+    let n_agent_lines = build_agent_lines(rows, budget).len().max(1);
+    let trend_row = if has_trend { 1 } else { 0 };
+    (2 + 1 + trend_row + n_agent_lines + 1) as u16
 }
 
 /// Third Overview row — process count, current RSS, direction + spark, then
@@ -359,6 +551,7 @@ fn render_top_projects(
     area: Rect,
     rows: &[ProjectRow],
     now: chrono::DateTime<chrono::Utc>,
+    selected: Option<usize>,
 ) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -379,16 +572,40 @@ fn render_top_projects(
         return;
     }
 
-    // Name col = inner width - count(4) - age(6) - two spaces(2).
-    let name_width = (inner.width as usize).saturating_sub(12).max(10);
+    // Reserve 2 cols for the selection indicator (`▶ ` or `  `) so the
+    // name column lines up regardless of which row is focused. Without the
+    // reservation, the entire list would shift one column right whenever
+    // the user toggles cursor onto Projects, which looks like a bug.
+    let indicator_w: usize = 2;
+    // Name col = inner width - indicator(2) - count(4) - age(6) - two spaces(2).
+    let name_width = (inner.width as usize)
+        .saturating_sub(12 + indicator_w)
+        .max(10);
     let lines: Vec<Line> = rows
         .iter()
-        .map(|r| {
-            Line::from(vec![
+        .enumerate()
+        .map(|(idx, r)| {
+            let is_selected = selected == Some(idx);
+            let prefix_span = if is_selected {
                 Span::styled(
-                    shorten_tail(&r.cwd, name_width),
-                    Style::default().fg(Color::White),
-                ),
+                    "▶ ",
+                    Style::default()
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("  ")
+            };
+            let name_style = if is_selected {
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(vec![
+                prefix_span,
+                Span::styled(shorten_tail(&r.cwd, name_width), name_style),
                 Span::raw(" "),
                 Span::styled(format!("{:>3}", r.count), theme::muted()),
                 Span::raw(" "),
@@ -524,6 +741,23 @@ fn humanize_age(d: chrono::Duration) -> String {
     }
 }
 
+/// Render a USD amount with two decimals and a leading `$`. Always shows two
+/// decimals even for whole-dollar amounts so eyeball alignment in the
+/// Overview row stays clean. Sub-cent amounts (typically only on brand-new
+/// sessions) collapse to "$0.00" rather than "<$0.01" — the user understands.
+fn format_cost(n: f64) -> String {
+    if n.is_nan() || n.is_infinite() {
+        return "—".into();
+    }
+    if n >= 10_000.0 {
+        // Drop cents at four-figure-and-above totals; "$12,345" reads
+        // better than "$12,345.67" in the same horizontal space.
+        format!("${:.0}", n)
+    } else {
+        format!("${:.2}", n)
+    }
+}
+
 /// Truncate from the left so the trailing path segment (usually the repo dir)
 /// stays visible — the prefix is lower-signal.
 fn shorten_tail(s: &str, max: usize) -> String {
@@ -577,5 +811,186 @@ mod tests {
     fn trend_footnote_all_zero_still_shows_sampling() {
         // No process data yet → keep user oriented on the sampling cadence.
         assert_eq!(trend_footnote(&[0, 0, 0], 5), "(5s)");
+    }
+
+    fn row(agent: &'static str, sessions: usize) -> AgentTokenRow {
+        AgentTokenRow {
+            agent,
+            sessions,
+            tokens: crate::adapter::types::TokenStats::default(),
+        }
+    }
+
+    #[test]
+    fn agent_lines_pack_into_single_line_when_fitting() {
+        let rows = vec![row("claude", 10), row("codex", 5)];
+        let lines = build_agent_lines(&rows, 80);
+        assert_eq!(lines.len(), 1, "two short items should share one line");
+    }
+
+    #[test]
+    fn agent_lines_wrap_when_budget_too_small() {
+        // Six rows roughly mirroring the screenshot: ClaudeCode=355
+        // ClaudeDesktop=2 Codex=258 Gemini=4 Hermes=5 OpenCode=429.
+        let rows = vec![
+            row("claude", 355),
+            row("claude-desktop", 2),
+            row("codex", 258),
+            row("gemini", 4),
+            row("hermes", 5),
+            row("opencode", 429),
+        ];
+        // Tight budget that can hold ~3 of these per row.
+        let lines = build_agent_lines(&rows, 50);
+        assert!(
+            lines.len() >= 2,
+            "expected wrap, got {} lines on 50-col budget",
+            lines.len()
+        );
+    }
+
+    #[test]
+    fn agent_lines_overflow_one_per_row_when_no_item_fits() {
+        // Pathological narrow budget: every item gets its own line, never dropped.
+        let rows = vec![row("claude", 1), row("codex", 2), row("gemini", 3)];
+        let lines = build_agent_lines(&rows, 1);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn overview_height_grows_with_agent_count() {
+        let many = (0..10)
+            .map(|i| {
+                let s = Box::leak(format!("agent{i}").into_boxed_str());
+                row(s, i)
+            })
+            .collect::<Vec<_>>();
+        // Wide terminal — single line.
+        let h_wide = compute_overview_height(200, &many, false);
+        // Narrow terminal — must wrap.
+        let h_narrow = compute_overview_height(40, &many, false);
+        assert!(
+            h_narrow > h_wide,
+            "narrow ({h_narrow}) should exceed wide ({h_wide})"
+        );
+        // Empty rows still get one agent row → height 5 (matches legacy).
+        assert_eq!(compute_overview_height(200, &[], false), 5);
+        // Trend row adds 1 to whatever the no-trend height was.
+        assert_eq!(
+            compute_overview_height(200, &[], true),
+            compute_overview_height(200, &[], false) + 1
+        );
+    }
+
+    // -- Responsive layout tests ---------------------------------------------
+    // Render the full Dashboard onto a TestBackend at different geometries
+    // and assert the panels we expect to drop / restack actually do.
+
+    use crate::app::App;
+    use crate::collector::metrics::MetricsStore;
+    use crate::collector::token_refresh::TokenCache;
+    use crate::config::Config;
+    use parking_lot::RwLock;
+    use ratatui::backend::TestBackend;
+    use std::sync::Arc;
+
+    fn dashboard_app() -> App {
+        App {
+            config: Config::default(),
+            state: Arc::new(RwLock::new(crate::app::AppState::default())),
+            metrics: Arc::new(MetricsStore::new(8)),
+            adapters: Vec::new(),
+            tab: crate::app::Tab::Dashboard,
+            should_quit: false,
+            session_filter: String::new(),
+            session_filter_input: false,
+            session_sort: crate::app::SessionSort::default(),
+            delete_confirm: None,
+            selected_process: 0,
+            selected_project: 0,
+            dashboard_cursor: crate::app::DashboardCursor::default(),
+            selected_setting: 0,
+            settings_keybindings_open: false,
+            selected_keybinding: 0,
+            capturing_keybinding: None,
+            keybinding_conflict: None,
+            token_cache: Arc::new(TokenCache::new()),
+            token_trend: Arc::new(crate::collector::token_trend::TokenTrend::default()),
+            dirty: Arc::new(tokio::sync::Notify::new()),
+            token_dirty: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    fn dump_buffer(buffer: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::with_capacity((buffer.area.width * buffer.area.height) as usize);
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                out.push_str(buffer[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn dashboard_short_terminal_drops_tokens_strip() {
+        let _guard = crate::settings::test_lock();
+        let app = dashboard_app();
+        // 24 rows is below DASHBOARD_TOKENS_STRIP_MIN_HEIGHT(28).
+        let backend = TestBackend::new(120, 24);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let _ = term
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let dump = dump_buffer(term.backend().buffer());
+        assert!(
+            !dump.contains("Tokens by agent"),
+            "tokens strip leaked at h=24:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn dashboard_tall_terminal_keeps_tokens_strip() {
+        let _guard = crate::settings::test_lock();
+        let app = dashboard_app();
+        // 40 rows is well above the threshold.
+        let backend = TestBackend::new(120, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let _ = term
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let dump = dump_buffer(term.backend().buffer());
+        assert!(
+            dump.contains("Tokens by agent"),
+            "tokens strip missing at h=40:\n{dump}"
+        );
+    }
+
+    #[test]
+    fn dashboard_narrow_terminal_stacks_activity_above_top_projects() {
+        let _guard = crate::settings::test_lock();
+        let app = dashboard_app();
+        // 60 cols: middle row drops below DASHBOARD_HSTACK_MIN_WIDTH(70).
+        let backend = TestBackend::new(60, 40);
+        let mut term = ratatui::Terminal::new(backend).unwrap();
+        let _ = term
+            .draw(|frame| render(frame, frame.area(), &app))
+            .unwrap();
+        let buffer = term.backend().buffer();
+        let mut activity_y: Option<u16> = None;
+        let mut projects_y: Option<u16> = None;
+        for y in 0..buffer.area.height {
+            let row: String = (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect();
+            if activity_y.is_none() && row.contains("Activity") {
+                activity_y = Some(y);
+            }
+            if projects_y.is_none() && row.contains("Top Projects") {
+                projects_y = Some(y);
+            }
+        }
+        let (a, p) = (activity_y.expect("activity"), projects_y.expect("projects"));
+        assert!(a < p, "activity (y={a}) should sit above projects (y={p})");
     }
 }

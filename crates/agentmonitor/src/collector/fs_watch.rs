@@ -23,11 +23,26 @@ use tokio::time::{interval, sleep};
 use crate::adapter::types::{SessionMeta, TokenStats};
 use crate::adapter::DynAdapter;
 use crate::app::AppState;
+use crate::collector::token_refresh::TokenCache;
 
 /// Background task: owns a notify watcher + fallback ticker.
 pub async fn run(
     adapters: Vec<DynAdapter>,
     state: Arc<RwLock<AppState>>,
+    token_dirty: Arc<Notify>,
+    dirty: Arc<Notify>,
+) {
+    run_with_cache(adapters, state, None, token_dirty, dirty).await
+}
+
+/// Variant that also has a `TokenCache` handle so reconcile can prune cache
+/// entries for sessions that have disappeared without an explicit Remove
+/// event (CLAUDE.md §12 / unbounded growth concern). Kept as a separate
+/// entry point so existing callers in tests don't need a cache argument.
+pub async fn run_with_cache(
+    adapters: Vec<DynAdapter>,
+    state: Arc<RwLock<AppState>>,
+    cache: Option<Arc<TokenCache>>,
     token_dirty: Arc<Notify>,
     dirty: Arc<Notify>,
 ) {
@@ -84,6 +99,15 @@ pub async fn run(
                 }
                 fresh.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 replace_preserving_tokens(&state, fresh);
+                if let Some(cache) = cache.as_ref() {
+                    let live: std::collections::HashSet<PathBuf> = state
+                        .read()
+                        .sessions
+                        .iter()
+                        .map(|m| m.path.clone())
+                        .collect();
+                    cache.retain_paths(&live);
+                }
                 dirty.notify_one();
                 token_dirty.notify_one();
             }
@@ -142,46 +166,47 @@ async fn update_for_path(
     };
 
     let mut s = state.write();
-    if let Some(existing) = s.sessions.iter_mut().find(|m| m.path == path) {
-        // KEEP tokens + message_count. They are owned by token_refresh; if we
-        // let fast-parse noise through here the Dashboard would flash back to
-        // a header-only subtotal every time the active session is appended.
-        let kept_tokens = std::mem::take(&mut existing.tokens);
-        let kept_count = existing.message_count;
-        *existing = meta;
-        existing.tokens = kept_tokens;
-        existing.message_count = kept_count;
-        tracing::debug!(path = %path.display(), "fs_watch: updated existing session");
-    } else {
-        // Diagnostic: dump any sessions with the same filename so we can see
-        // exactly how the event path differs from stored paths. If this fires
-        // it means some upstream representation (symlink form, Unicode
-        // normalization, trailing slash, etc.) still isn't being normalized.
-        let filename = path.file_name().map(|n| n.to_os_string());
-        let similar: Vec<String> = s
-            .sessions
-            .iter()
-            .filter(|m| m.path.file_name().map(|n| n.to_os_string()) == filename)
-            .map(|m| m.path.display().to_string())
-            .take(3)
-            .collect();
-        tracing::warn!(
-            event_path = %path.display(),
-            similar_in_state = ?similar,
-            sessions_count = s.sessions.len(),
-            "fs_watch: event path did not match any stored session — tracking as new"
-        );
-        // Brand new session — zero the fast-parse values explicitly. They'd
-        // either be 0 already (typical Claude/Codex sessions whose headers
-        // hold no usage) or a tiny sliver that doesn't reflect reality; either
-        // way token_refresh's first pass on this path will fill in truth.
-        let mut fresh = meta;
-        fresh.tokens = TokenStats::default();
-        fresh.message_count = 0;
-        tracing::info!(path = %path.display(), "fs_watch: new session tracked");
-        s.sessions.push(fresh);
-    }
-    s.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    s.mutate_sessions(|sessions| {
+        if let Some(existing) = sessions.iter_mut().find(|m| m.path == path) {
+            // KEEP tokens + message_count. They are owned by token_refresh; if we
+            // let fast-parse noise through here the Dashboard would flash back to
+            // a header-only subtotal every time the active session is appended.
+            let kept_tokens = std::mem::take(&mut existing.tokens);
+            let kept_count = existing.message_count;
+            *existing = meta;
+            existing.tokens = kept_tokens;
+            existing.message_count = kept_count;
+            tracing::debug!(path = %path.display(), "fs_watch: updated existing session");
+        } else {
+            // Diagnostic: dump any sessions with the same filename so we can see
+            // exactly how the event path differs from stored paths. If this fires
+            // it means some upstream representation (symlink form, Unicode
+            // normalization, trailing slash, etc.) still isn't being normalized.
+            let filename = path.file_name().map(|n| n.to_os_string());
+            let similar: Vec<String> = sessions
+                .iter()
+                .filter(|m| m.path.file_name().map(|n| n.to_os_string()) == filename)
+                .map(|m| m.path.display().to_string())
+                .take(3)
+                .collect();
+            tracing::warn!(
+                event_path = %path.display(),
+                similar_in_state = ?similar,
+                sessions_count = sessions.len(),
+                "fs_watch: event path did not match any stored session — tracking as new"
+            );
+            // Brand new session — zero the fast-parse values explicitly. They'd
+            // either be 0 already (typical Claude/Codex sessions whose headers
+            // hold no usage) or a tiny sliver that doesn't reflect reality; either
+            // way token_refresh's first pass on this path will fill in truth.
+            let mut fresh = meta;
+            fresh.tokens = TokenStats::default();
+            fresh.message_count = 0;
+            tracing::info!(path = %path.display(), "fs_watch: new session tracked");
+            sessions.push(fresh);
+        }
+        sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    });
     s.dirty = true;
     true
 }
@@ -207,40 +232,51 @@ pub(crate) fn replace_preserving_tokens(
         meta.path = normalize_fs_path(std::mem::take(&mut meta.path));
     }
     let mut s = state.write();
-    // Drain prev into a by-path map so we can (a) look up tokens to
-    // preserve, and (b) harvest the sessions that fresh didn't report.
-    let mut prev: HashMap<PathBuf, SessionMeta> =
-        s.sessions.drain(..).map(|m| (m.path.clone(), m)).collect();
+    let new_arc = {
+        // Drain prev into a by-path map so we can (a) look up tokens to
+        // preserve, and (b) harvest the sessions that fresh didn't report.
+        // The `make_mut` call gives us an in-place mutable Vec when we own
+        // the only Arc, or copies-on-write when other holders exist (e.g.
+        // a dashboard render in flight).
+        let inner = std::mem::take(&mut s.sessions);
+        let prev_vec: Vec<SessionMeta> = match Arc::try_unwrap(inner) {
+            Ok(v) => v,
+            Err(arc) => (*arc).clone(),
+        };
+        let mut prev: HashMap<PathBuf, SessionMeta> =
+            prev_vec.into_iter().map(|m| (m.path.clone(), m)).collect();
 
-    let mut merged: Vec<SessionMeta> = Vec::with_capacity(prev.len().max(fresh.len()));
-    let mut preserved = 0usize;
-    let mut new_paths = 0usize;
-    for mut meta in fresh {
-        if let Some(existing) = prev.remove(&meta.path) {
-            meta.tokens = existing.tokens;
-            meta.message_count = existing.message_count;
-            preserved += 1;
-        } else {
-            meta.tokens = TokenStats::default();
-            meta.message_count = 0;
-            new_paths += 1;
+        let mut merged: Vec<SessionMeta> = Vec::with_capacity(prev.len().max(fresh.len()));
+        let mut preserved = 0usize;
+        let mut new_paths = 0usize;
+        for mut meta in fresh {
+            if let Some(existing) = prev.remove(&meta.path) {
+                meta.tokens = existing.tokens;
+                meta.message_count = existing.message_count;
+                preserved += 1;
+            } else {
+                meta.tokens = TokenStats::default();
+                meta.message_count = 0;
+                new_paths += 1;
+            }
+            merged.push(meta);
         }
-        merged.push(meta);
-    }
-    // Anything still in `prev` was in state but absent from fresh. Keep it
-    // — see the doc comment above for why this is the right call.
-    let carried = prev.len();
-    for (_, meta) in prev {
-        merged.push(meta);
-    }
-    tracing::info!(
-        preserved,
-        new_paths,
-        carried,
-        total = merged.len(),
-        "fs_watch: reconcile merged sessions"
-    );
-    s.sessions = merged;
+        // Anything still in `prev` was in state but absent from fresh. Keep it
+        // — see the doc comment above for why this is the right call.
+        let carried = prev.len();
+        for (_, meta) in prev {
+            merged.push(meta);
+        }
+        tracing::info!(
+            preserved,
+            new_paths,
+            carried,
+            total = merged.len(),
+            "fs_watch: reconcile merged sessions"
+        );
+        Arc::new(merged)
+    };
+    s.sessions = new_arc;
     s.dirty = true;
 }
 
@@ -332,7 +368,7 @@ mod tests {
         // must not roll the Dashboard back to zero — this is the regression
         // the user reported ("jumps up then falls back to a very old value").
         let state = Arc::new(RwLock::new(AppState::default()));
-        state.write().sessions = vec![sess("/a", 1_000_000, 42)];
+        state.write().sessions = Arc::new(vec![sess("/a", 1_000_000, 42)]);
 
         let fresh = vec![sess("/a", 0, 0)];
         replace_preserving_tokens(&state, fresh);
@@ -381,7 +417,7 @@ mod tests {
         // see the header, so anything beyond that is noise. Regressions are
         // better than false inflation here.
         let state = Arc::new(RwLock::new(AppState::default()));
-        state.write().sessions = vec![sess("/a", 100, 5)];
+        state.write().sessions = Arc::new(vec![sess("/a", 100, 5)]);
 
         let fresh = vec![sess("/a", 9_999_999, 999)];
         replace_preserving_tokens(&state, fresh);
@@ -402,11 +438,11 @@ mod tests {
         // Now reconcile is a merge: scan_all adds/updates only, deletion is
         // the sole job of EventKind::Remove.
         let state = Arc::new(RwLock::new(AppState::default()));
-        state.write().sessions = vec![
+        state.write().sessions = Arc::new(vec![
             sess("/a", 1_000, 10),
             sess("/b", 2_000, 20), // flaky: scan_all failed to parse this pass
             sess("/c", 3_000, 30),
-        ];
+        ]);
 
         let fresh = vec![sess("/a", 0, 0), sess("/c", 0, 0)]; // /b missing
         replace_preserving_tokens(&state, fresh);

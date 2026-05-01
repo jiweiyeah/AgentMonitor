@@ -398,6 +398,13 @@ pub struct Settings {
     pub star_prompt_count: u32,
     /// User-editable keyboard shortcuts, grouped by context.
     pub keybindings: KeyBindings,
+    /// Paths the user has bookmarked. Persisted across sessions; the Sessions
+    /// list floats these to the top by default and renders a star icon next
+    /// to each. Filter token `starred:true` / `starred:false` matches against
+    /// this set. We store paths as strings (rather than `PathBuf`) so JSON
+    /// (de)serialization stays trivial and platform-portable.
+    #[serde(default)]
+    pub starred_paths: Vec<String>,
 }
 
 impl Default for Settings {
@@ -414,6 +421,7 @@ impl Default for Settings {
             launch_count: 0,
             star_prompt_count: 0,
             keybindings: KeyBindings::default(),
+            starred_paths: Vec::new(),
         }
     }
 }
@@ -488,6 +496,27 @@ pub fn update<F: FnOnce(&mut Settings)>(f: F) {
     let mut guard = settings().write();
     f(&mut guard);
     save_after_update(&guard);
+}
+
+/// Returns whether `path` is in the starred set. Cheap (linear over a small
+/// list — most users star fewer than a dozen sessions). String comparison;
+/// callers should pass the canonical path form `SessionMeta::path` carries.
+pub fn is_starred(path: &Path) -> bool {
+    let s = settings().read();
+    let key = path.to_string_lossy();
+    s.starred_paths.iter().any(|p| p == key.as_ref())
+}
+
+/// Toggle whether `path` is starred. Persists to disk via `update()`.
+pub fn toggle_starred(path: &Path) {
+    let key = path.to_string_lossy().to_string();
+    update(|s| {
+        if let Some(idx) = s.starred_paths.iter().position(|p| p == &key) {
+            s.starred_paths.swap_remove(idx);
+        } else {
+            s.starred_paths.push(key);
+        }
+    });
 }
 
 #[cfg(test)]

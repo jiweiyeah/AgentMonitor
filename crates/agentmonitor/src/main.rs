@@ -33,11 +33,41 @@ struct Cli {
     /// Enable verbose tracing to `$XDG_CACHE_HOME/agent-monitor.log`.
     #[arg(long)]
     debug: bool,
+
+    /// Override the Claude Code projects directory. Default:
+    /// `~/.claude/projects`. Use this when your sessions live under a custom
+    /// dotfiles path or behind a symlink that the default detection misses.
+    #[arg(long, value_name = "PATH")]
+    claude_root: Option<std::path::PathBuf>,
+
+    /// Override the Codex sessions directory. Default: `~/.codex/sessions`.
+    #[arg(long, value_name = "PATH")]
+    codex_root: Option<std::path::PathBuf>,
+
+    /// Override the Gemini CLI tmp directory. Default: `~/.gemini/tmp`.
+    #[arg(long, value_name = "PATH")]
+    gemini_root: Option<std::path::PathBuf>,
+
+    /// Override the Hermes Agent state directory. Default: `~/.hermes`.
+    #[arg(long, value_name = "PATH")]
+    hermes_root: Option<std::path::PathBuf>,
+
+    /// Override the OpenCode share directory. Default:
+    /// `~/.local/share/opencode`.
+    #[arg(long, value_name = "PATH")]
+    opencode_root: Option<std::path::PathBuf>,
+
+    /// Override the Claude Desktop local-agent-mode-sessions directory.
+    /// Default (macOS):
+    /// `~/Library/Application Support/Claude-3p/local-agent-mode-sessions`.
+    #[arg(long, value_name = "PATH")]
+    claude_desktop_root: Option<std::path::PathBuf>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.debug)?;
+    install_panic_hook();
 
     // Persisted preferences win unless the user overrode on the CLI. The
     // default clap value (`2`) would otherwise always clobber a saved choice.
@@ -48,10 +78,30 @@ fn main() -> Result<()> {
         cli.sample_interval
     };
 
-    let config = Config {
+    let mut config = Config {
         sample_interval: Duration::from_secs(sample_secs.max(1)),
         ..Config::default()
     };
+    // CLI flags override the auto-detected defaults. Each is independent —
+    // a user with custom Claude root but default Codex root works fine.
+    if let Some(path) = cli.claude_root {
+        config.claude_root = Some(path);
+    }
+    if let Some(path) = cli.codex_root {
+        config.codex_root = Some(path);
+    }
+    if let Some(path) = cli.gemini_root {
+        config.gemini_root = Some(path);
+    }
+    if let Some(path) = cli.hermes_root {
+        config.hermes_root = Some(path);
+    }
+    if let Some(path) = cli.opencode_root {
+        config.opencode_root = Some(path);
+    }
+    if let Some(path) = cli.claude_desktop_root {
+        config.claude_desktop_root = Some(path);
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -118,4 +168,29 @@ fn init_tracing(debug: bool) -> Result<()> {
         .with_ansi(false)
         .init();
     Ok(())
+}
+
+/// Install a panic hook that restores the terminal to a sane state before
+/// printing the panic. Without this, a panic in raw-mode/alt-screen leaves
+/// the user's terminal in raw mode (no echo, no line buffering) and the
+/// panic info hidden behind the alternate screen — they have to blindly
+/// type `reset` to recover.
+///
+/// The hook chains to the original (default) handler at the end so the
+/// panic still aborts the process and `RUST_BACKTRACE=1` still works.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // Best-effort terminal restoration — failures during panic are logged
+        // but not propagated. Order mirrors `restore_terminal`.
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stderr(), LeaveAlternateScreen, DisableMouseCapture);
+        // Mirror to log file (no-op if --debug wasn't passed and there's no
+        // active subscriber — `tracing::error!` becomes a cheap macro then).
+        tracing::error!(panic = %info, "agent-monitor panicked");
+        // Run the default handler last so the standard panic message + any
+        // backtrace is printed AFTER the terminal is restored. Otherwise the
+        // alternate screen would swallow the message before exit.
+        original(info);
+    }));
 }

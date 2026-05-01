@@ -1,7 +1,6 @@
 use std::io::ErrorKind;
 use std::io::Stdout;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -9,7 +8,6 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use tokio::sync::Notify;
 
 use crate::adapter::{adapter_for_path, DynAdapter};
 use crate::adapter::types::SessionStatus;
@@ -39,11 +37,12 @@ pub async fn run_event_loop(
     mut app: App,
     _opts: EventLoopOptions,
 ) -> Result<()> {
-    let dirty = Arc::new(Notify::new());
-    // Dedicated signal from fs_watch → token_refresh. Separate from `dirty`
-    // so a render-only notification doesn't spin the (heavier) token refresh
-    // loop, and a file change doesn't miss redraws.
-    let token_dirty = Arc::new(Notify::new());
+    // The render-trigger and token-refresh-trigger Notifies live on `App` so
+    // any spawned task (including ones created by event handlers) can wake the
+    // loop without having to be threaded the handle. Take clones here for the
+    // collectors and the local select.
+    let dirty = app.dirty.clone();
+    let token_dirty = app.token_dirty.clone();
 
     // Spawn background collectors. P1 uses the placeholder fs_watch; P3/P4
     // swap in notify-backed implementations without touching this function.
@@ -59,15 +58,17 @@ pub async fn run_event_loop(
 
     let adapters_fs = app.adapters.clone();
     let state_fs = state.clone();
+    let cache_fs = app.token_cache.clone();
     let dirty_fs = dirty.clone();
     let token_dirty_fs = token_dirty.clone();
     tokio::spawn(async move {
-        fs_watch::run(adapters_fs, state_fs, token_dirty_fs, dirty_fs).await;
+        fs_watch::run_with_cache(adapters_fs, state_fs, Some(cache_fs), token_dirty_fs, dirty_fs).await;
     });
 
     let adapters_tok = app.adapters.clone();
     let state_tok = state.clone();
     let cache_tok = app.token_cache.clone();
+    let trend_tok = app.token_trend.clone();
     let dirty_tok = dirty.clone();
     let token_dirty_tok = token_dirty.clone();
     tokio::spawn(async move {
@@ -75,6 +76,7 @@ pub async fn run_event_loop(
             adapters_tok,
             state_tok,
             cache_tok,
+            trend_tok,
             token_dirty_tok,
             dirty_tok,
         )
@@ -236,6 +238,27 @@ fn handle_event(ev: Event, app: &mut App) -> bool {
         app.should_quit = true;
         return true;
     }
+    // Help overlay is modal: any keypress dismisses it and is NOT dispatched
+    // to the underlying tab. This makes `?` discoverable without surprising
+    // the user with side effects (e.g. `q` quitting after they hit `?`).
+    if app.state.read().show_help {
+        let mut s = app.state.write();
+        s.show_help = false;
+        s.dirty = true;
+        return false;
+    }
+    // `?` toggles help open. Checked before delete-confirm / mode dispatch so
+    // it works in every context. Delete-confirm modal still wins in the next
+    // step if it's already open.
+    if !app.state.read().show_help
+        && app.delete_confirm.is_none()
+        && key_matches(KeyAction::ShowHelp, key.code, key.modifiers)
+    {
+        let mut s = app.state.write();
+        s.show_help = true;
+        s.dirty = true;
+        return false;
+    }
     if app.delete_confirm.is_some() {
         return handle_delete_confirm(key.code, key.modifiers, app);
     }
@@ -319,7 +342,14 @@ fn handle_tab_specific_normal_action(
             if app.tab == Tab::Dashboard
                 && key_matches(KeyAction::DashboardJumpSession, code, modifiers) =>
         {
-            jump_to_selected_process_session(app);
+            jump_dashboard(app);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Dashboard
+                && key_matches(KeyAction::DashboardCycleCursor, code, modifiers) =>
+        {
+            cycle_dashboard_cursor(app);
             true
         }
         (code, modifiers)
@@ -408,6 +438,13 @@ fn handle_tab_specific_normal_action(
                 && key_matches(KeyAction::SessionsDelete, code, modifiers) =>
         {
             prompt_delete_selected_session(app);
+            true
+        }
+        (code, modifiers)
+            if app.tab == Tab::Sessions
+                && key_matches(KeyAction::SessionsToggleStar, code, modifiers) =>
+        {
+            toggle_selected_session_star(app);
             true
         }
         _ => false,
@@ -595,14 +632,27 @@ fn move_selection(app: &mut App, delta: i32) {
             s.dirty = true;
         }
         Tab::Dashboard => {
-            // Dashboard embeds the processes table; j/k walks its rows so
-            // Enter's "jump to session" action still targets a real row.
-            let len = app.metrics.snapshot().len();
-            if len == 0 {
-                return;
+            // Dashboard now has TWO cursor modes: Process and Project. j/k
+            // walks rows of whichever panel is focused; `Tab` toggles.
+            match app.dashboard_cursor {
+                crate::app::DashboardCursor::Process => {
+                    let len = app.metrics.snapshot().len();
+                    if len == 0 {
+                        return;
+                    }
+                    app.selected_process = clamp_step(app.selected_process, delta, len);
+                    app.state.write().dirty = true;
+                }
+                crate::app::DashboardCursor::Project => {
+                    // Recompute the projects list snapshot to clamp.
+                    let len = current_top_project_count(app);
+                    if len == 0 {
+                        return;
+                    }
+                    app.selected_project = clamp_step(app.selected_project, delta, len);
+                    app.state.write().dirty = true;
+                }
             }
-            app.selected_process = clamp_step(app.selected_process, delta, len);
-            app.state.write().dirty = true;
         }
         Tab::Settings => {
             // +1 for the GitHub link row appended after SettingsItem::all().
@@ -644,6 +694,76 @@ fn jump_to_selected_process_session(app: &mut App) {
     maybe_load_preview(app);
 }
 
+/// Enter dispatch on the Dashboard. Branches on which panel cursor is on.
+fn jump_dashboard(app: &mut App) {
+    match app.dashboard_cursor {
+        crate::app::DashboardCursor::Process => jump_to_selected_process_session(app),
+        crate::app::DashboardCursor::Project => jump_to_selected_project(app),
+    }
+}
+
+/// Tab inside Dashboard cycles between the Process panel and the Top
+/// Projects panel.
+fn cycle_dashboard_cursor(app: &mut App) {
+    app.dashboard_cursor = app.dashboard_cursor.toggle();
+    // Selection in the now-focused panel may be out of bounds (e.g. user has
+    // selected_project=5 but there are only 3 project rows). Clamp here.
+    match app.dashboard_cursor {
+        crate::app::DashboardCursor::Process => {
+            let len = app.metrics.snapshot().len();
+            app.selected_process = app.selected_process.min(len.saturating_sub(1));
+        }
+        crate::app::DashboardCursor::Project => {
+            let len = current_top_project_count(app);
+            app.selected_project = app.selected_project.min(len.saturating_sub(1));
+        }
+    }
+    app.state.write().dirty = true;
+}
+
+/// Compute the same Top Projects snapshot the Dashboard renderer uses, so
+/// j/k clamping and Enter dispatch stay consistent with the visible list.
+/// Cap matches the renderer's truncation in `tui::dashboard::render`: we
+/// truncate to a generous 100 because the actual visible row count depends
+/// on the terminal height the renderer doesn't know about here. j/k clamping
+/// would otherwise diverge from "what's on screen", but in practice the user
+/// only sees ≤ visible_rows projects, so clamping to 100 is a strict
+/// superset that doesn't matter for selection logic.
+fn current_top_project_count(app: &App) -> usize {
+    let s = app.state.read();
+    crate::tui::stats::top_projects(&s.sessions, 100).len()
+}
+
+/// Enter on a project row: set a `cwd:<path>` filter and switch to the
+/// Sessions tab. The user lands on the first session matching that cwd.
+fn jump_to_selected_project(app: &mut App) {
+    let cwd = {
+        let s = app.state.read();
+        let projects = crate::tui::stats::top_projects(&s.sessions, 100);
+        projects
+            .get(app.selected_project)
+            .map(|row| row.cwd.clone())
+    };
+    let Some(cwd) = cwd else {
+        return;
+    };
+
+    // The filter syntax is `cwd:<substring>`; the project's cwd is already
+    // an exact path. We pass it through as-is; `session_matches_token` does
+    // substring matching, so any slashes / spaces in the path are fine
+    // (split_whitespace tokenizes the filter, but a single token is enough
+    // for unique-cwd matching, and project paths rarely contain whitespace).
+    app.session_filter = format!("cwd:{}", cwd);
+    app.session_filter_input = false;
+    app.tab = Tab::Sessions;
+    {
+        let mut state = app.state.write();
+        state.selected_session = 0;
+        state.dirty = true;
+    }
+    maybe_load_preview(app);
+}
+
 fn clamp_step(cur: usize, delta: i32, len: usize) -> usize {
     if len == 0 {
         return 0;
@@ -657,7 +777,22 @@ fn clamp_step(cur: usize, delta: i32, len: usize) -> usize {
 }
 
 fn handle_viewer(code: KeyCode, modifiers: KeyModifiers, app: &mut App, path: &Path) -> bool {
+    // If the user is currently typing a search query, swallow normal viewer
+    // shortcuts and route the keypress to the search input handler. We
+    // deliberately check this before any `key_matches` calls so a binding for
+    // (e.g.) `q` doesn't quit the viewer mid-search.
+    if viewer_search_is_editing(app) {
+        handle_viewer_search_input(code, modifiers, app);
+        return false;
+    }
     match (code, modifiers) {
+        (code, modifiers) if key_matches(KeyAction::ViewerSearchCancel, code, modifiers)
+            && viewer_has_active_search(app) =>
+        {
+            // Esc on a committed search clears it without leaving the viewer.
+            // ViewerBack still wins when there's no active search (handled below).
+            clear_viewer_search(app);
+        }
         (code, modifiers) if key_matches(KeyAction::ViewerBack, code, modifiers) => {
             let mut s = app.state.write();
             s.mode = Mode::Normal;
@@ -699,9 +834,161 @@ fn handle_viewer(code: KeyCode, modifiers: KeyModifiers, app: &mut App, path: &P
         (code, modifiers) if key_matches(KeyAction::ViewerDelete, code, modifiers) => {
             prompt_delete_for_path(app, path)
         }
+        (code, modifiers) if key_matches(KeyAction::ViewerSearchStart, code, modifiers) => {
+            start_viewer_search(app);
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerSearchNext, code, modifiers) => {
+            advance_viewer_search(app, 1);
+        }
+        (code, modifiers) if key_matches(KeyAction::ViewerSearchPrev, code, modifiers) => {
+            advance_viewer_search(app, -1);
+        }
         _ => {}
     }
     false
+}
+
+/// True if the user is currently typing inside the viewer search bar.
+/// Calls into the conversation cache, so it must not be called while the
+/// state lock is held by the caller.
+fn viewer_search_is_editing(app: &App) -> bool {
+    let s = app.state.read();
+    s.conversation
+        .as_ref()
+        .and_then(|c| c.search.as_ref())
+        .is_some_and(|sr| sr.editing)
+}
+
+fn viewer_has_active_search(app: &App) -> bool {
+    let s = app.state.read();
+    s.conversation
+        .as_ref()
+        .and_then(|c| c.search.as_ref())
+        .is_some_and(|sr| !sr.query.is_empty() || sr.editing)
+}
+
+/// `/` pressed in viewer mode. Open the search bar in editing mode, clearing
+/// any prior query so the user starts fresh.
+fn start_viewer_search(app: &App) {
+    let mut s = app.state.write();
+    let Some(cache) = s.conversation.as_mut() else {
+        return;
+    };
+    cache.search = Some(crate::app::ViewerSearch {
+        query: String::new(),
+        matches: Vec::new(),
+        current: 0,
+        editing: true,
+    });
+    s.dirty = true;
+}
+
+/// Drop the current search entirely (`Esc` on a committed search). Frees up
+/// the search-bar row and removes any highlight from the body.
+fn clear_viewer_search(app: &App) {
+    let mut s = app.state.write();
+    let Some(cache) = s.conversation.as_mut() else {
+        return;
+    };
+    cache.search = None;
+    s.dirty = true;
+}
+
+/// Handle keystrokes while the search bar is in editing mode. Esc cancels
+/// the search outright; Enter commits + computes matches and jumps to the
+/// nearest one; Backspace deletes one char and recomputes; printable chars
+/// append + recompute.
+fn handle_viewer_search_input(code: KeyCode, modifiers: KeyModifiers, app: &mut App) {
+    if key_matches(KeyAction::ViewerSearchCancel, code, modifiers) {
+        clear_viewer_search(app);
+        return;
+    }
+    if key_matches(KeyAction::FilterApply, code, modifiers) {
+        commit_viewer_search(app);
+        return;
+    }
+    if key_matches(KeyAction::FilterDeleteChar, code, modifiers) {
+        let mut s = app.state.write();
+        if let Some(cache) = s.conversation.as_mut() {
+            if let Some(sr) = cache.search.as_mut() {
+                sr.query.pop();
+            }
+        }
+        drop(s);
+        // Live-recompute on every keypress so the user sees match count update.
+        recompute_search_matches(app);
+        return;
+    }
+    if let KeyCode::Char(c) = code {
+        if !c.is_control() && !modifiers.contains(KeyModifiers::CONTROL) {
+            let mut s = app.state.write();
+            if let Some(cache) = s.conversation.as_mut() {
+                if let Some(sr) = cache.search.as_mut() {
+                    sr.query.push(c);
+                }
+            }
+            drop(s);
+            recompute_search_matches(app);
+        }
+    }
+}
+
+/// Switch from editing → committed: matches were already live-computed by the
+/// keystroke handler, so all we do is flip the editing flag and scroll to the
+/// current match if any. No-op if the query is still empty.
+fn commit_viewer_search(app: &App) {
+    let mut s = app.state.write();
+    let Some(cache) = s.conversation.as_mut() else {
+        return;
+    };
+    let Some(sr) = cache.search.as_mut() else {
+        return;
+    };
+    if sr.query.is_empty() {
+        cache.search = None;
+        s.dirty = true;
+        return;
+    }
+    sr.editing = false;
+    let target_line = sr.matches.get(sr.current).copied();
+    if let Some(line) = target_line {
+        cache.scroll = line as u16;
+    }
+    s.dirty = true;
+}
+
+/// Reuse viewer's `refresh_search_matches` to recompute the match index list
+/// against the current events + expand mode. This is cheap on small sessions
+/// and stays under a few ms even for transcripts north of 100K lines.
+fn recompute_search_matches(app: &App) {
+    let mut s = app.state.write();
+    let Some(cache) = s.conversation.as_mut() else {
+        return;
+    };
+    crate::tui::viewer::refresh_search_matches(cache);
+    s.dirty = true;
+}
+
+/// `n` / `N` after commit: step current match forward (delta=1) or backward
+/// (delta=-1) with wrap-around, scrolling to the new line. Does nothing if
+/// no committed matches.
+fn advance_viewer_search(app: &App, delta: i32) {
+    let mut s = app.state.write();
+    let Some(cache) = s.conversation.as_mut() else {
+        return;
+    };
+    let Some(sr) = cache.search.as_mut() else {
+        return;
+    };
+    if sr.matches.is_empty() {
+        return;
+    }
+    let len = sr.matches.len() as i32;
+    let next = (sr.current as i32 + delta).rem_euclid(len) as usize;
+    sr.current = next;
+    let target = sr.matches[next] as u16;
+    cache.scroll = target;
+    s.dirty = true;
 }
 
 fn handle_delete_confirm(code: KeyCode, modifiers: KeyModifiers, app: &mut App) -> bool {
@@ -801,71 +1088,124 @@ fn rescan_sessions(app: &App) {
 }
 
 fn open_url(url: &str, app: &mut App) {
-    let result = if cfg!(target_os = "macos") {
-        std::process::Command::new("open").arg(url).spawn()
-    } else {
-        std::process::Command::new("xdg-open").arg(url).spawn()
-    };
-    if let Err(err) = result {
-        tracing::warn!(?err, "failed to open browser");
-        app.state.write().toast = Some("Failed to open browser".into());
-        app.state.write().dirty = true;
-    } else {
-        app.state.write().toast = Some("Opening in browser...".into());
-        app.state.write().dirty = true;
-    }
+    // Both `open` (macOS) and `xdg-open` (Linux) return immediately after
+    // forking the actual handler, so the synchronous `spawn()` here is
+    // already non-blocking. We still wrap in tokio::spawn for consistency
+    // with the rest of the event-handler "fire and forget" model and so
+    // future Windows support (#17) can use a longer-lived `Start-Process`
+    // without re-architecting.
+    let url_owned = url.to_string();
+    tokio::spawn(async move {
+        let res = if cfg!(target_os = "macos") {
+            tokio::process::Command::new("open").arg(&url_owned).status().await
+        } else {
+            tokio::process::Command::new("xdg-open").arg(&url_owned).status().await
+        };
+        if let Err(err) = res {
+            tracing::warn!(?err, "failed to open browser");
+        }
+    });
+    app.state.write().toast = Some("Opening in browser...".into());
+    app.state.write().dirty = true;
 }
 
+/// Star the project on GitHub. Tries `gh api` if available — but in an async
+/// task so the network round-trip never blocks the TUI event loop. The user
+/// sees a "checking…" toast immediately and a "starred!" / "already starred"
+/// toast on completion.
 fn open_github_star(app: &mut App) {
     let repo = "jiweiyeah/AgentMonitor";
+    let dirty = app.dirty.clone();
+    let state = app.state.clone();
 
-    // Try `gh api` if the GitHub CLI is available.
-    if crate::settings::which_exists("gh") {
-        // Check whether already starred. The endpoint returns 204 (success) when
-        // starred and 404 (failure) when not, so `status.success()` is enough.
-        let check = std::process::Command::new("gh")
-            .args(["api", &format!("user/starred/{}", repo)])
-            .output();
-
-        match check {
-            Ok(out) if out.status.success() => {
-                crate::settings::update(|s| s.star_status = crate::settings::StarStatus::Starred);
-                app.state.write().toast = Some("Already starred on GitHub".into());
-                app.state.write().dirty = true;
-                return;
-            }
-            Ok(_) => {
-                // 404 — not starred yet. Continue to star it.
-            }
-            Err(err) => {
-                tracing::warn!(?err, "failed to check star status via gh api");
-            }
-        }
-
-        // Star the repository via the REST API.
-        let star = std::process::Command::new("gh")
-            .args(["api", "-X", "PUT", &format!("user/starred/{}", repo)])
-            .output();
-
-        match star {
-            Ok(out) if out.status.success() => {
-                crate::settings::update(|s| s.star_status = crate::settings::StarStatus::Starred);
-                app.state.write().toast = Some("Starred on GitHub!".into());
-                app.state.write().dirty = true;
-                return;
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                tracing::warn!(stderr = %stderr, "gh api star failed, falling back to browser");
-            }
-            Err(err) => {
-                tracing::warn!(?err, "failed to spawn gh api star, falling back to browser");
-            }
-        }
+    // If `gh` isn't on PATH, skip the API path entirely and just open browser.
+    if !crate::settings::which_exists("gh") {
+        open_url(&format!("https://github.com/{}", repo), app);
+        return;
     }
 
-    // Fallback: open the GitHub page in the default browser.
-    open_url(&format!("https://github.com/{}", repo), app);
+    // Show the in-flight toast immediately so the user knows their `*` was
+    // received even if the network is slow.
+    app.state.write().toast = Some("Checking GitHub star…".into());
+    app.state.write().dirty = true;
+
+    tokio::spawn(async move {
+        let outcome = star_via_gh_api(repo).await;
+        match outcome {
+            StarOutcome::Already => {
+                crate::settings::update(|s| {
+                    s.star_status = crate::settings::StarStatus::Starred
+                });
+                let mut s = state.write();
+                s.toast = Some("Already starred on GitHub".into());
+                s.dirty = true;
+            }
+            StarOutcome::Starred => {
+                crate::settings::update(|s| {
+                    s.star_status = crate::settings::StarStatus::Starred
+                });
+                let mut s = state.write();
+                s.toast = Some("Starred on GitHub!".into());
+                s.dirty = true;
+            }
+            StarOutcome::Failed(reason) => {
+                tracing::warn!(?reason, "gh api star fell back to browser");
+                {
+                    let mut s = state.write();
+                    s.toast = Some("Opening GitHub in browser…".into());
+                    s.dirty = true;
+                } // drop guard before awaiting
+                let url = format!("https://github.com/{}", repo);
+                let res = if cfg!(target_os = "macos") {
+                    tokio::process::Command::new("open").arg(&url).status().await
+                } else {
+                    tokio::process::Command::new("xdg-open").arg(&url).status().await
+                };
+                if let Err(err) = res {
+                    tracing::warn!(?err, "failed to open browser fallback");
+                }
+            }
+        }
+        dirty.notify_one();
+    });
+}
+
+/// Outcome of one `gh api` round-trip. Kept simple — we only care whether to
+/// flip the persisted star status and what to say in the toast.
+enum StarOutcome {
+    Already,
+    Starred,
+    Failed(String),
+}
+
+async fn star_via_gh_api(repo: &str) -> StarOutcome {
+    // Step 1: check current state. The endpoint returns 204 (success) when
+    // starred and 404 (failure) when not.
+    let check = tokio::process::Command::new("gh")
+        .args(["api", &format!("user/starred/{}", repo)])
+        .output()
+        .await;
+    match check {
+        Ok(out) if out.status.success() => return StarOutcome::Already,
+        Ok(_) => {
+            // 404 — not starred yet. Continue to PUT.
+        }
+        Err(err) => return StarOutcome::Failed(format!("check: {err}")),
+    }
+
+    // Step 2: actually star.
+    let put = tokio::process::Command::new("gh")
+        .args(["api", "-X", "PUT", &format!("user/starred/{}", repo)])
+        .output()
+        .await;
+    match put {
+        Ok(out) if out.status.success() => StarOutcome::Starred,
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            StarOutcome::Failed(stderr)
+        }
+        Err(err) => StarOutcome::Failed(format!("put: {err}")),
+    }
 }
 
 fn prompt_delete_selected_session(app: &mut App) {
@@ -873,6 +1213,18 @@ fn prompt_delete_selected_session(app: &mut App) {
         return;
     };
     prompt_delete_for_path(app, &path);
+}
+
+/// Toggle the bookmark on the currently-selected session. Persists to disk
+/// via `settings::toggle_starred`. Triggers a redraw so the star icon and
+/// the new sort position appear immediately.
+fn toggle_selected_session_star(app: &mut App) {
+    let Some(path) = current_selected_path(app) else {
+        return;
+    };
+    crate::settings::toggle_starred(&path);
+    let mut s = app.state.write();
+    s.dirty = true;
 }
 
 fn prompt_delete_for_path(app: &mut App, path: &Path) {
@@ -1145,6 +1497,7 @@ mod tests {
     use parking_lot::RwLock;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use tokio::sync::Notify;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     fn test_app() -> App {
@@ -1164,12 +1517,17 @@ mod tests {
             session_sort: SessionSort::default(),
             delete_confirm: None,
             selected_process: 0,
+            selected_project: 0,
+            dashboard_cursor: crate::app::DashboardCursor::default(),
             selected_setting: 0,
             settings_keybindings_open: false,
             selected_keybinding: 0,
             capturing_keybinding: None,
             keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
+            token_trend: Arc::new(crate::collector::token_trend::TokenTrend::default()),
+            dirty: Arc::new(Notify::new()),
+            token_dirty: Arc::new(Notify::new()),
         }
     }
 
@@ -1366,7 +1724,7 @@ mod tests {
 
         let mut app = test_app();
         app.tab = Tab::Sessions;
-        app.state.write().sessions = vec![SessionMeta {
+        app.state.write().sessions = Arc::new(vec![SessionMeta {
             agent: "claude",
             id: "delete-me".into(),
             path: session_path.clone(),
@@ -1383,7 +1741,7 @@ mod tests {
             status: SessionStatus::Idle,
             byte_offset: 0,
             size_bytes: 2,
-        }];
+        }]);
 
         let should_exit = handle_normal(KeyCode::Char('d'), KeyModifiers::empty(), &mut app);
 
@@ -1416,7 +1774,7 @@ mod tests {
 
         let mut app = test_app();
         app.tab = Tab::Sessions;
-        app.state.write().sessions = vec![SessionMeta {
+        app.state.write().sessions = Arc::new(vec![SessionMeta {
             agent: "claude",
             id: "delete-me".into(),
             path: session_path.clone(),
@@ -1433,7 +1791,7 @@ mod tests {
             status: SessionStatus::Idle,
             byte_offset: 0,
             size_bytes: 2,
-        }];
+        }]);
 
         let should_exit = handle_normal(KeyCode::Delete, KeyModifiers::empty(), &mut app);
 
@@ -1470,7 +1828,7 @@ mod tests {
         let mut app = test_app();
         {
             let mut state = app.state.write();
-            state.sessions = vec![SessionMeta {
+            state.sessions = Arc::new(vec![SessionMeta {
                 agent: "claude",
                 id: "delete-me".into(),
                 path: session_path.clone(),
@@ -1487,7 +1845,7 @@ mod tests {
                 status: SessionStatus::Idle,
                 byte_offset: 0,
                 size_bytes: 2,
-            }];
+            }]);
             state.mode = Mode::Viewer {
                 path: session_path.clone(),
             };
@@ -1532,7 +1890,7 @@ mod tests {
 
         let mut app = test_app();
         app.tab = Tab::Sessions;
-        app.state.write().sessions = vec![SessionMeta {
+        app.state.write().sessions = Arc::new(vec![SessionMeta {
             agent: "claude",
             id: "delete-me".into(),
             path: session_path.clone(),
@@ -1549,7 +1907,7 @@ mod tests {
             status: SessionStatus::Idle,
             byte_offset: 0,
             size_bytes: 16,
-        }];
+        }]);
         {
             let mut state = app.state.write();
             state.preview = Some(PreviewCache {
@@ -1608,7 +1966,7 @@ mod tests {
 
         let mut app = test_app();
         app.tab = Tab::Sessions;
-        app.state.write().sessions = vec![SessionMeta {
+        app.state.write().sessions = Arc::new(vec![SessionMeta {
             agent: "claude",
             id: "delete-me".into(),
             path: session_path.clone(),
@@ -1625,7 +1983,7 @@ mod tests {
             status: SessionStatus::Idle,
             byte_offset: 0,
             size_bytes: 16,
-        }];
+        }]);
         app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
 
         let should_exit = handle_event(
@@ -1693,7 +2051,7 @@ mod tests {
         std::fs::write(&session_path, "{\"type\":\"user\"}\n").expect("write session");
 
         let mut app = test_app();
-        app.state.write().sessions = vec![SessionMeta {
+        app.state.write().sessions = Arc::new(vec![SessionMeta {
             agent: "claude",
             id: "active".into(),
             path: session_path.clone(),
@@ -1710,7 +2068,7 @@ mod tests {
             status: SessionStatus::Active,
             byte_offset: 0,
             size_bytes: 16,
-        }];
+        }]);
         app.delete_confirm = Some(DeleteConfirm::new(session_path.clone()));
 
         let should_exit = handle_event(
@@ -1751,7 +2109,7 @@ mod tests {
         let mut app = test_app();
         {
             let mut state = app.state.write();
-            state.sessions = vec![SessionMeta {
+            state.sessions = Arc::new(vec![SessionMeta {
                 agent: "claude",
                 id: "active".into(),
                 path: session_path.clone(),
@@ -1768,7 +2126,7 @@ mod tests {
                 status: SessionStatus::Active,
                 byte_offset: 0,
                 size_bytes: 16,
-            }];
+            }]);
             state.preview = Some(PreviewCache {
                 path: session_path.clone(),
                 messages: Vec::new(),
@@ -1875,7 +2233,7 @@ mod tests {
                 ..Config::default()
             },
             state: Arc::new(RwLock::new(AppState {
-                sessions: vec![SessionMeta {
+                sessions: Arc::new(vec![SessionMeta {
                     agent: "codex",
                     id: "019dc3ba-a222-7631-96e6-2e1ebb238e53".into(),
                     path: session_path.clone(),
@@ -1892,13 +2250,14 @@ mod tests {
                     status: SessionStatus::Idle,
                     byte_offset: 0,
                     size_bytes: 0,
-                }],
+                }]),
                 selected_session: 0,
                 dirty: false,
                 preview: None,
                 mode: Mode::Normal,
                 conversation: None,
                 toast: None,
+                show_help: false,
             })),
             metrics: Arc::new(MetricsStore::new(8)),
             adapters: vec![
@@ -1912,12 +2271,17 @@ mod tests {
             session_sort: SessionSort::default(),
             delete_confirm: None,
             selected_process: 0,
+            selected_project: 0,
+            dashboard_cursor: crate::app::DashboardCursor::default(),
             selected_setting: 0,
             settings_keybindings_open: false,
             selected_keybinding: 0,
             capturing_keybinding: None,
             keybinding_conflict: None,
             token_cache: Arc::new(TokenCache::new()),
+            token_trend: Arc::new(crate::collector::token_trend::TokenTrend::default()),
+            dirty: Arc::new(Notify::new()),
+            token_dirty: Arc::new(Notify::new()),
         };
 
         maybe_load_preview(&app);
@@ -1948,5 +2312,114 @@ mod tests {
         assert_eq!(preview.messages[1].text, "hello from assistant");
 
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn show_help_toggles_on_question_mark_and_dismisses_on_any_key() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let mut app = test_app();
+
+        // Initially hidden.
+        assert!(!app.state.read().show_help);
+
+        // `?` opens.
+        let press = |code: KeyCode, modifiers: KeyModifiers| crossterm::event::KeyEvent {
+            code,
+            modifiers,
+            kind: crossterm::event::KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        let exit = handle_event(
+            crossterm::event::Event::Key(press(KeyCode::Char('?'), KeyModifiers::empty())),
+            &mut app,
+        );
+        assert!(!exit);
+        assert!(app.state.read().show_help, "? must open the overlay");
+
+        // Any key (e.g. `q`) while overlay is open: dismisses but does NOT quit.
+        let exit = handle_event(
+            crossterm::event::Event::Key(press(KeyCode::Char('q'), KeyModifiers::empty())),
+            &mut app,
+        );
+        assert!(!exit, "key while help is open must not propagate to quit");
+        assert!(!app.state.read().show_help, "any key dismisses overlay");
+        assert!(!app.should_quit, "the q must not have quit the app");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dashboard_project_cursor_jump_sets_cwd_filter_and_switches_tab() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let mut app = test_app();
+        app.tab = Tab::Dashboard;
+        app.dashboard_cursor = crate::app::DashboardCursor::Project;
+        app.selected_project = 0;
+
+        // Seed sessions with two distinct cwds so top_projects has two rows.
+        let s1 = SessionMeta {
+            agent: "claude",
+            id: "a".into(),
+            path: PathBuf::from("/tmp/a.jsonl"),
+            cwd: Some(PathBuf::from("/Users/me/code/foo")),
+            model: None,
+            version: None,
+            git_branch: None,
+            source: None,
+            started_at: None,
+            updated_at: Some(chrono::Utc::now()),
+            message_count: 0,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Active,
+            byte_offset: 0,
+            size_bytes: 0,
+        };
+        let s2 = SessionMeta {
+            id: "b".into(),
+            path: PathBuf::from("/tmp/b.jsonl"),
+            cwd: Some(PathBuf::from("/Users/me/code/bar")),
+            ..s1.clone()
+        };
+        app.state.write().sessions = Arc::new(vec![s1, s2]);
+
+        // First project (most recent / most sessions) should be /foo or /bar
+        // depending on tie-break — both have count=1 so latest wins. Since
+        // they were created with the same `Utc::now()` we can't depend on
+        // order, just confirm the filter ends up matching ONE of them.
+        jump_dashboard(&mut app);
+        assert_eq!(app.tab, Tab::Sessions);
+        assert!(
+            app.session_filter.starts_with("cwd:"),
+            "expected cwd: filter, got {}",
+            app.session_filter
+        );
+        let visible = app
+            .state
+            .read()
+            .visible_session_indices(&app.session_filter, app.session_sort);
+        assert_eq!(
+            visible.len(),
+            1,
+            "filter should narrow to a single project; got {visible:?} for filter `{}`",
+            app.session_filter,
+        );
+    }
+
+    #[test]
+    fn cycle_dashboard_cursor_toggles_focus() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let mut app = test_app();
+        app.tab = Tab::Dashboard;
+        assert_eq!(app.dashboard_cursor, crate::app::DashboardCursor::Process);
+
+        cycle_dashboard_cursor(&mut app);
+        assert_eq!(app.dashboard_cursor, crate::app::DashboardCursor::Project);
+
+        cycle_dashboard_cursor(&mut app);
+        assert_eq!(app.dashboard_cursor, crate::app::DashboardCursor::Process);
     }
 }

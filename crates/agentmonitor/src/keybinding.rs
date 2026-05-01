@@ -44,6 +44,7 @@ pub enum KeyAction {
     MoveUp,
     Refresh,
     DashboardJumpSession,
+    DashboardCycleCursor,
     SessionsOpenViewer,
     SessionsStartFilter,
     SessionsCycleSort,
@@ -51,6 +52,7 @@ pub enum KeyAction {
     SessionsClearFilter,
     SessionsResume,
     SessionsDelete,
+    SessionsToggleStar,
     SettingsActivate,
     SettingsChangeNext,
     SettingsChangePrevious,
@@ -71,12 +73,17 @@ pub enum KeyAction {
     ViewerCollapse,
     ViewerResume,
     ViewerDelete,
+    ViewerSearchStart,
+    ViewerSearchNext,
+    ViewerSearchPrev,
+    ViewerSearchCancel,
     DeleteCancel,
     DeleteConfirm,
     FilterCancel,
     FilterApply,
     FilterDeleteChar,
     Star,
+    ShowHelp,
 }
 
 impl KeyAction {
@@ -92,6 +99,7 @@ impl KeyAction {
             KeyAction::MoveUp,
             KeyAction::Refresh,
             KeyAction::DashboardJumpSession,
+            KeyAction::DashboardCycleCursor,
             KeyAction::SessionsOpenViewer,
             KeyAction::SessionsStartFilter,
             KeyAction::SessionsCycleSort,
@@ -99,6 +107,7 @@ impl KeyAction {
             KeyAction::SessionsClearFilter,
             KeyAction::SessionsResume,
             KeyAction::SessionsDelete,
+            KeyAction::SessionsToggleStar,
             KeyAction::SettingsActivate,
             KeyAction::SettingsChangeNext,
             KeyAction::SettingsChangePrevious,
@@ -119,12 +128,17 @@ impl KeyAction {
             KeyAction::ViewerCollapse,
             KeyAction::ViewerResume,
             KeyAction::ViewerDelete,
+            KeyAction::ViewerSearchStart,
+            KeyAction::ViewerSearchNext,
+            KeyAction::ViewerSearchPrev,
+            KeyAction::ViewerSearchCancel,
             KeyAction::DeleteCancel,
             KeyAction::DeleteConfirm,
             KeyAction::FilterCancel,
             KeyAction::FilterApply,
             KeyAction::FilterDeleteChar,
             KeyAction::Star,
+            KeyAction::ShowHelp,
         ]
     }
 
@@ -140,13 +154,15 @@ impl KeyAction {
             | KeyAction::MoveUp
             | KeyAction::Refresh => KeyContext::Global,
             KeyAction::DashboardJumpSession => KeyContext::Dashboard,
+            KeyAction::DashboardCycleCursor => KeyContext::Dashboard,
             KeyAction::SessionsOpenViewer
             | KeyAction::SessionsStartFilter
             | KeyAction::SessionsCycleSort
             | KeyAction::SessionsToggleActiveOnly
             | KeyAction::SessionsClearFilter
             | KeyAction::SessionsResume
-            | KeyAction::SessionsDelete => KeyContext::Sessions,
+            | KeyAction::SessionsDelete
+            | KeyAction::SessionsToggleStar => KeyContext::Sessions,
             KeyAction::SettingsActivate
             | KeyAction::SettingsChangeNext
             | KeyAction::SettingsChangePrevious
@@ -166,13 +182,18 @@ impl KeyAction {
             | KeyAction::ViewerExpand
             | KeyAction::ViewerCollapse
             | KeyAction::ViewerResume
-            | KeyAction::ViewerDelete => KeyContext::Viewer,
+            | KeyAction::ViewerDelete
+            | KeyAction::ViewerSearchStart
+            | KeyAction::ViewerSearchNext
+            | KeyAction::ViewerSearchPrev
+            | KeyAction::ViewerSearchCancel => KeyContext::Viewer,
             KeyAction::DeleteCancel => KeyContext::DeleteConfirm,
             KeyAction::DeleteConfirm => KeyContext::DeleteConfirm,
             KeyAction::FilterCancel | KeyAction::FilterApply | KeyAction::FilterDeleteChar => {
                 KeyContext::FilterInput
             }
             KeyAction::Star => KeyContext::Global,
+            KeyAction::ShowHelp => KeyContext::Global,
         }
     }
 
@@ -188,6 +209,7 @@ impl KeyAction {
             KeyAction::MoveUp => "key_action.move_up",
             KeyAction::Refresh => "key_action.refresh",
             KeyAction::DashboardJumpSession => "key_action.dashboard_jump_session",
+            KeyAction::DashboardCycleCursor => "key_action.dashboard_cycle_cursor",
             KeyAction::SessionsOpenViewer => "key_action.sessions_open_viewer",
             KeyAction::SessionsStartFilter => "key_action.sessions_start_filter",
             KeyAction::SessionsCycleSort => "key_action.sessions_cycle_sort",
@@ -195,6 +217,7 @@ impl KeyAction {
             KeyAction::SessionsClearFilter => "key_action.sessions_clear_filter",
             KeyAction::SessionsResume => "key_action.sessions_resume",
             KeyAction::SessionsDelete => "key_action.sessions_delete",
+            KeyAction::SessionsToggleStar => "key_action.sessions_toggle_star",
             KeyAction::SettingsActivate => "key_action.settings_activate",
             KeyAction::SettingsChangeNext => "key_action.settings_change_next",
             KeyAction::SettingsChangePrevious => "key_action.settings_change_previous",
@@ -215,12 +238,17 @@ impl KeyAction {
             KeyAction::ViewerCollapse => "key_action.viewer_collapse",
             KeyAction::ViewerResume => "key_action.viewer_resume",
             KeyAction::ViewerDelete => "key_action.viewer_delete",
+            KeyAction::ViewerSearchStart => "key_action.viewer_search_start",
+            KeyAction::ViewerSearchNext => "key_action.viewer_search_next",
+            KeyAction::ViewerSearchPrev => "key_action.viewer_search_prev",
+            KeyAction::ViewerSearchCancel => "key_action.viewer_search_cancel",
             KeyAction::DeleteCancel => "key_action.delete_cancel",
             KeyAction::DeleteConfirm => "key_action.delete_confirm",
             KeyAction::FilterCancel => "key_action.filter_cancel",
             KeyAction::FilterApply => "key_action.filter_apply",
             KeyAction::FilterDeleteChar => "key_action.filter_delete_char",
             KeyAction::Star => "key_action.star",
+            KeyAction::ShowHelp => "key_action.show_help",
         }
     }
 }
@@ -534,6 +562,7 @@ pub fn default_bindings(action: KeyAction) -> Vec<KeyBinding> {
         ],
         KeyAction::Refresh => vec![KeyBinding::plain(KeyCodeSpec::Char('f'))],
         KeyAction::DashboardJumpSession => vec![KeyBinding::plain(KeyCodeSpec::Enter)],
+        KeyAction::DashboardCycleCursor => vec![KeyBinding::plain(KeyCodeSpec::Tab)],
         KeyAction::SessionsOpenViewer => vec![KeyBinding::plain(KeyCodeSpec::Enter)],
         KeyAction::SessionsStartFilter => vec![KeyBinding::plain(KeyCodeSpec::Char('/'))],
         KeyAction::SessionsCycleSort => vec![KeyBinding::plain(KeyCodeSpec::Char('s'))],
@@ -544,6 +573,7 @@ pub fn default_bindings(action: KeyAction) -> Vec<KeyBinding> {
             KeyBinding::plain(KeyCodeSpec::Char('d')),
             KeyBinding::plain(KeyCodeSpec::Delete),
         ],
+        KeyAction::SessionsToggleStar => vec![KeyBinding::plain(KeyCodeSpec::Char('b'))],
         KeyAction::SettingsActivate => vec![KeyBinding::plain(KeyCodeSpec::Enter)],
         KeyAction::SettingsChangeNext => vec![KeyBinding::plain(KeyCodeSpec::Right)],
         KeyAction::SettingsChangePrevious => vec![KeyBinding::plain(KeyCodeSpec::Left)],
@@ -576,6 +606,10 @@ pub fn default_bindings(action: KeyAction) -> Vec<KeyBinding> {
             KeyBinding::plain(KeyCodeSpec::Char('d')),
             KeyBinding::plain(KeyCodeSpec::Delete),
         ],
+        KeyAction::ViewerSearchStart => vec![KeyBinding::plain(KeyCodeSpec::Char('/'))],
+        KeyAction::ViewerSearchNext => vec![KeyBinding::plain(KeyCodeSpec::Char('n'))],
+        KeyAction::ViewerSearchPrev => vec![KeyBinding::plain(KeyCodeSpec::Char('N'))],
+        KeyAction::ViewerSearchCancel => vec![KeyBinding::plain(KeyCodeSpec::Esc)],
         KeyAction::DeleteCancel => vec![
             KeyBinding::plain(KeyCodeSpec::Esc),
             KeyBinding::plain(KeyCodeSpec::Char('q')),
@@ -588,5 +622,6 @@ pub fn default_bindings(action: KeyAction) -> Vec<KeyBinding> {
         KeyAction::FilterApply => vec![KeyBinding::plain(KeyCodeSpec::Enter)],
         KeyAction::FilterDeleteChar => vec![KeyBinding::plain(KeyCodeSpec::Backspace)],
         KeyAction::Star => vec![KeyBinding::plain(KeyCodeSpec::Char('*'))],
+        KeyAction::ShowHelp => vec![KeyBinding::plain(KeyCodeSpec::Char('?'))],
     }
 }

@@ -4,12 +4,14 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use parking_lot::RwLock;
+use tokio::sync::Notify;
 
 use crate::adapter::conversation::ConversationEvent;
 use crate::adapter::types::{MessagePreview, SessionMeta, SessionStatus};
 use crate::adapter::{ClaudeAdapter, ClaudeDesktopAdapter, CodexAdapter, DynAdapter, GeminiAdapter, HermesAdapter, OpencodeAdapter};
 use crate::collector::metrics::{MetricsStore, ProcessEntry};
 use crate::collector::token_refresh::TokenCache;
+use crate::collector::token_trend::TokenTrend;
 use crate::config::Config;
 use crate::keybinding::KeyAction;
 
@@ -76,6 +78,30 @@ pub enum ExpandMode {
     Expanded,
 }
 
+/// Per-viewer search state. `editing == true` means the user is typing in
+/// the search bar (so printable keys append to `query` and Esc cancels);
+/// `editing == false` means the search has been committed and `n` / `N`
+/// jump between matches.
+///
+/// `matches` holds line indices into the viewer's flattened render cache —
+/// computed once on commit, scrolled to on demand. We deliberately do not
+/// re-compute on every render because `RenderCache::lines` is the source of
+/// truth for "where lines actually are" and only changes when the events
+/// vector or expand mode flips.
+#[derive(Debug, Clone, Default)]
+pub struct ViewerSearch {
+    pub query: String,
+    pub matches: Vec<usize>,
+    pub current: usize,
+    pub editing: bool,
+}
+
+impl ViewerSearch {
+    pub fn is_empty(&self) -> bool {
+        self.query.is_empty() && self.matches.is_empty() && !self.editing
+    }
+}
+
 /// Fully-parsed transcript kept alive while the viewer is (or was last) open.
 /// Lives on `AppState` so background loaders and the renderer share one source
 /// of truth without extra plumbing.
@@ -95,6 +121,9 @@ pub struct ConversationCache {
     /// handler to clamp `scroll` so `G` and oversized deltas land on a real
     /// row instead of leaving `scroll` out-of-bounds forever.
     pub last_rendered_total: u32,
+    /// In-viewer search. `None` when the search bar has never been opened
+    /// for this conversation; `Some(state)` once the user pressed `/`.
+    pub search: Option<ViewerSearch>,
 }
 
 impl ConversationCache {
@@ -109,6 +138,7 @@ impl ConversationCache {
             error: None,
             viewport_height: 0,
             last_rendered_total: 0,
+            search: None,
         }
     }
 
@@ -153,10 +183,40 @@ impl SessionSort {
     }
 }
 
+/// Where the cursor lives within the Dashboard tab. The user toggles between
+/// the Live Processes table and the Top Projects panel with Tab; j/k then
+/// walks rows within whichever panel is active. Enter dispatches based on
+/// which panel is focused: Process → jump to that process's session,
+/// Project → set a `cwd:<path>` filter and switch to the Sessions tab.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum DashboardCursor {
+    #[default]
+    Process,
+    Project,
+}
+
+impl DashboardCursor {
+    pub fn toggle(self) -> Self {
+        match self {
+            Self::Process => Self::Project,
+            Self::Project => Self::Process,
+        }
+    }
+}
+
 /// Shared state snapshot rendered every frame.
 #[derive(Debug, Default)]
 pub struct AppState {
-    pub sessions: Vec<SessionMeta>,
+    /// Read-many-write-rare snapshot of all known sessions. We hand out
+    /// `Arc::clone`s to renderers so a single dirty notify doesn't trigger
+    /// a deep copy of (potentially) thousands of `SessionMeta` rows. Mutators
+    /// (`fs_watch`, `token_refresh`, `App::initial_scan`) use a
+    /// clone-mutate-replace cycle: `(*state.sessions).clone()` → mutate → wrap
+    /// in a fresh `Arc` → assign. This keeps every other holder's copy stable
+    /// while in flight, which matters because the dashboard renderer drops
+    /// the state lock immediately after grabbing the Arc — without the Arc,
+    /// concurrent writes would be visible mid-render.
+    pub sessions: Arc<Vec<SessionMeta>>,
     pub selected_session: usize,
     pub dirty: bool,
     /// Cached preview + full stats for the currently selected session.
@@ -169,9 +229,27 @@ pub struct AppState {
     pub conversation: Option<ConversationCache>,
     /// Transient toast message shown after star actions. Cleared on next key.
     pub toast: Option<String>,
+    /// True while the help overlay (`?`) is being shown. Painted on top of
+    /// whatever tab/mode the user is in. Lives in shared state instead of on
+    /// `App` so renderers reading the state lock can paint the overlay without
+    /// extra plumbing.
+    pub show_help: bool,
 }
 
 impl AppState {
+    /// Apply a mutating closure to `sessions` using the clone-mutate-replace
+    /// pattern. Cheap when no other Arc holders exist (Arc::make_mut path),
+    /// allocates a single new Vec when there is — exactly the behavior we
+    /// want: dashboards holding read-only Arcs see a stable snapshot while
+    /// the writer makes its edit.
+    pub fn mutate_sessions<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Vec<SessionMeta>) -> R,
+    {
+        let inner = Arc::make_mut(&mut self.sessions);
+        f(inner)
+    }
+
     /// Compute the indices of `sessions` that pass `filter` and are sorted
     /// according to `sort`. Returned indices refer to the raw `self.sessions`
     /// vector, so callers can use them to index back into it without cloning.
@@ -183,10 +261,28 @@ impl AppState {
         let mut idxs: Vec<usize> = (0..self.sessions.len())
             .filter(|&i| tokens.is_empty() || session_matches_filter(&self.sessions[i], &tokens))
             .collect();
+        // Snapshot starred set once so we don't acquire the settings read
+        // lock per pairwise comparison. Empty in the common case.
+        let starred = crate::settings::get().starred_paths;
+        let is_starred = |idx: usize| -> bool {
+            let key = self.sessions[idx].path.to_string_lossy();
+            starred.iter().any(|p| p == key.as_ref())
+        };
         match sort {
             SessionSort::UpdatedDesc => {
                 // Storage is already sorted by updated_at desc, but a filter
                 // may have skipped rows — keep the relative order stable.
+                // Starred sessions float to the top within this default sort
+                // so users see their pinned conversations first; explicit
+                // sorts below ignore the star bit (the user asked for tokens
+                // / size / etc., not "starred + tokens").
+                if !starred.is_empty() {
+                    idxs.sort_by(|&a, &b| {
+                        is_starred(b).cmp(&is_starred(a)).then_with(|| {
+                            self.sessions[b].updated_at.cmp(&self.sessions[a].updated_at)
+                        })
+                    });
+                }
             }
             SessionSort::TokensDesc => {
                 idxs.sort_by(|&a, &b| {
@@ -253,7 +349,7 @@ impl AppState {
     /// state that was pointing at it.
     pub fn remove_session_path(&mut self, path: &Path) -> bool {
         let before_len = self.sessions.len();
-        self.sessions.retain(|m| m.path != path);
+        self.mutate_sessions(|s| s.retain(|m| m.path != path));
         let removed_session = self.sessions.len() != before_len;
 
         if removed_session {
@@ -329,11 +425,21 @@ fn session_matches_token(s: &SessionMeta, token: &str) -> bool {
                 "id" => s.id.to_lowercase().contains(value),
                 "model" => contains_opt(&s.model, value),
                 "version" => contains_opt(&s.version, value),
+                "starred" => starred_matches(&s.path, value),
                 _ => session_matches_fuzzy(s, token),
             };
         }
     }
     session_matches_fuzzy(s, token)
+}
+
+fn starred_matches(path: &Path, value: &str) -> bool {
+    let is_starred = crate::settings::is_starred(path);
+    match value {
+        "true" | "yes" | "1" | "y" => is_starred,
+        "false" | "no" | "0" | "n" => !is_starred,
+        _ => false,
+    }
 }
 
 fn session_matches_fuzzy(s: &SessionMeta, needle: &str) -> bool {
@@ -424,6 +530,12 @@ pub struct App {
     pub delete_confirm: Option<DeleteConfirm>,
     /// Process-tab row selection. Indexes into `metrics.snapshot()`.
     pub selected_process: usize,
+    /// Top Projects row selection (Dashboard tab). Indexes into the
+    /// project-list rendered in `tui::dashboard`.
+    pub selected_project: usize,
+    /// Which panel inside the Dashboard tab has focus. Toggled by Tab; j/k
+    /// and Enter dispatch based on this.
+    pub dashboard_cursor: DashboardCursor,
     /// Settings-tab row selection. Indexes into `SettingsItem::all()`.
     pub selected_setting: usize,
     pub settings_keybindings_open: bool,
@@ -435,6 +547,19 @@ pub struct App {
     /// aggregates and the Sessions list see accurate numbers without waiting
     /// on a full-parse per frame.
     pub token_cache: Arc<TokenCache>,
+    /// Time-series of cumulative token totals across all sessions. Fed by
+    /// `token_refresh::write_back` after every accepted update; consumed by
+    /// the Dashboard's tokens-per-minute sparkline.
+    pub token_trend: Arc<TokenTrend>,
+    /// Render-trigger signal. Any task that mutates `state` should call
+    /// `dirty.notify_one()` afterward so the next frame paints. Lives on
+    /// `App` so spawned-and-detached tasks (e.g. async `gh api` calls in
+    /// `open_github_star`) can reach it without a thread of plumbing.
+    pub dirty: Arc<Notify>,
+    /// fs_watch → token_refresh wakeup. Separate from `dirty` so a render-only
+    /// notification doesn't spin the (heavier) token refresh loop, and a file
+    /// change doesn't miss redraws.
+    pub token_dirty: Arc<Notify>,
 }
 
 impl App {
@@ -452,6 +577,9 @@ impl App {
         let state = Arc::new(RwLock::new(AppState::default()));
         let metrics = Arc::new(MetricsStore::new(config.metrics_capacity));
         let token_cache = Arc::new(TokenCache::new());
+        let token_trend = Arc::new(TokenTrend::default());
+        let dirty = Arc::new(Notify::new());
+        let token_dirty = Arc::new(Notify::new());
         let app = Self {
             config,
             state,
@@ -464,12 +592,17 @@ impl App {
             session_sort: SessionSort::default(),
             delete_confirm: None,
             selected_process: 0,
+            selected_project: 0,
+            dashboard_cursor: DashboardCursor::default(),
             selected_setting: 0,
             settings_keybindings_open: false,
             selected_keybinding: 0,
             capturing_keybinding: None,
             keybinding_conflict: None,
             token_cache,
+            token_trend,
+            dirty,
+            token_dirty,
         };
         app.initial_scan().await?;
 
@@ -521,7 +654,7 @@ impl App {
         }
         all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         let mut s = self.state.write();
-        s.sessions = all;
+        s.sessions = Arc::new(all);
         s.selected_session = 0;
         s.dirty = true;
         Ok(())
@@ -612,7 +745,7 @@ mod tests {
 
     fn state_with(sessions: Vec<SessionMeta>) -> AppState {
         AppState {
-            sessions,
+            sessions: Arc::new(sessions),
             ..Default::default()
         }
     }
@@ -872,7 +1005,7 @@ mod tests {
 
         let remove_path = remove.path.clone();
         let mut state = AppState {
-            sessions: vec![keep.clone(), remove.clone()],
+            sessions: Arc::new(vec![keep.clone(), remove.clone()]),
             selected_session: 1,
             dirty: false,
             preview: Some(PreviewCache {
@@ -886,6 +1019,7 @@ mod tests {
             },
             conversation: Some(ConversationCache::loading(remove_path.clone())),
             toast: None,
+            show_help: false,
         };
 
         state.remove_session_path(&remove_path);
@@ -925,7 +1059,7 @@ mod tests {
         let keep_path = keep.path.clone();
         let remove_path = remove.path.clone();
         let mut state = AppState {
-            sessions: vec![keep.clone(), remove],
+            sessions: Arc::new(vec![keep.clone(), remove]),
             selected_session: 1,
             dirty: false,
             preview: Some(PreviewCache {
@@ -939,6 +1073,7 @@ mod tests {
             },
             conversation: Some(ConversationCache::loading(keep_path.clone())),
             toast: None,
+            show_help: false,
         };
 
         state.remove_session_path(&remove_path);
@@ -959,5 +1094,137 @@ mod tests {
             Some(keep_path)
         );
         assert!(state.dirty);
+    }
+
+    #[test]
+    fn arc_snapshot_remains_stable_across_mutation() {
+        // The whole point of Arc<Vec<SessionMeta>>: a renderer that took a
+        // snapshot before the mutation should still see the old vec, not the
+        // mutated one. This is the property that lets dashboard::render hold
+        // its read for an entire frame without blocking writers.
+        let mut state = state_with(vec![mk(SessionFixture {
+            agent: "claude",
+            id: "before",
+            cwd: None,
+            size: 0,
+            msgs: 0,
+            updated_minutes_ago: 0,
+            token_total: 0,
+            status: SessionStatus::Active,
+        })]);
+
+        // Renderer-style snapshot: cheap Arc::clone.
+        let snapshot = state.sessions.clone();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, "before");
+
+        // Mutation: append a new session via the helper that exercises the
+        // CoW path. The snapshot must not see this push.
+        state.mutate_sessions(|sessions| {
+            sessions.push(mk(SessionFixture {
+                agent: "codex",
+                id: "after",
+                cwd: None,
+                size: 0,
+                msgs: 0,
+                updated_minutes_ago: 0,
+                token_total: 0,
+                status: SessionStatus::Active,
+            }));
+        });
+
+        // Snapshot is unchanged because Arc::make_mut copied on write.
+        assert_eq!(snapshot.len(), 1, "old Arc must keep its length");
+        assert_eq!(snapshot[0].id, "before", "old Arc keeps its data");
+        // The live state has both.
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(state.sessions[1].id, "after");
+    }
+
+    #[test]
+    fn dashboard_cursor_toggle_round_trips() {
+        let c = DashboardCursor::default();
+        assert_eq!(c, DashboardCursor::Process);
+        assert_eq!(c.toggle(), DashboardCursor::Project);
+        assert_eq!(c.toggle().toggle(), DashboardCursor::Process);
+    }
+
+    #[test]
+    fn starred_filter_token_matches_settings() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().starred_paths.clear();
+
+        let path = PathBuf::from("/tmp/starred-fixture.jsonl");
+        let s = SessionMeta {
+            agent: "claude",
+            id: "starred".into(),
+            path: path.clone(),
+            cwd: None,
+            model: None,
+            version: None,
+            git_branch: None,
+            source: None,
+            started_at: None,
+            updated_at: None,
+            message_count: 0,
+            tokens: TokenStats::default(),
+            status: SessionStatus::Active,
+            byte_offset: 0,
+            size_bytes: 0,
+        };
+
+        // Before bookmarking: starred:true rejects, starred:false accepts.
+        assert!(!session_matches_token(&s, "starred:true"));
+        assert!(session_matches_token(&s, "starred:false"));
+
+        // After bookmarking the path: flips.
+        crate::settings::toggle_starred(&path);
+        assert!(crate::settings::is_starred(&path));
+        assert!(session_matches_token(&s, "starred:true"));
+        assert!(!session_matches_token(&s, "starred:false"));
+
+        // Cleanup: unbookmark so other tests aren't affected.
+        crate::settings::toggle_starred(&path);
+    }
+
+    #[test]
+    fn starred_sessions_float_to_top_under_default_sort() {
+        let _guard = crate::settings::test_lock();
+        crate::settings::settings().write().starred_paths.clear();
+
+        // Three sessions, ordered newest-first by updated_at.
+        let now = chrono::Utc::now();
+        let mk_at = |id: &'static str, mins_ago: i64| {
+            let mut m = mk(SessionFixture {
+                agent: "claude",
+                id,
+                cwd: None,
+                size: 0,
+                msgs: 0,
+                updated_minutes_ago: 0,
+                token_total: 0,
+                status: SessionStatus::Active,
+            });
+            m.path = PathBuf::from(format!("/tmp/{id}.jsonl"));
+            m.updated_at = Some(now - chrono::Duration::minutes(mins_ago));
+            m
+        };
+        let a = mk_at("a", 0);
+        let b = mk_at("b", 10);
+        let c = mk_at("c", 20);
+
+        let state = state_with(vec![a, b, c]);
+
+        // Default order with no stars: storage order preserved.
+        let no_stars = state.visible_session_indices("", SessionSort::UpdatedDesc);
+        assert_eq!(no_stars, vec![0, 1, 2]);
+
+        // Star the oldest (c). Expected: c, then a, b in original order.
+        crate::settings::toggle_starred(&PathBuf::from("/tmp/c.jsonl"));
+        let with_star = state.visible_session_indices("", SessionSort::UpdatedDesc);
+        assert_eq!(with_star, vec![2, 0, 1]);
+
+        // Cleanup.
+        crate::settings::toggle_starred(&PathBuf::from("/tmp/c.jsonl"));
     }
 }

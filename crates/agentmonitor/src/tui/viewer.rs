@@ -18,10 +18,11 @@ use ratatui::Frame;
 
 use crate::adapter::conversation::{Block as CBlock, ConversationEvent};
 use crate::adapter::types::{MessageRole, SessionMeta};
-use crate::app::{App, ConversationCache, ExpandMode, Mode};
+use crate::app::{App, ConversationCache, ExpandMode, Mode, ViewerSearch};
 use crate::i18n::t;
 use crate::settings::{self, KeyAction};
 use crate::tui::theme;
+use crate::tui::widgets::pack_chips;
 
 /// Cached flattened transcript — kept outside of `AppState` so `draw()` can
 /// touch it without acquiring the state write lock. Invalidated by comparing
@@ -54,15 +55,39 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         (path, meta)
     };
 
+    // Build footer chips first so we can size the footer pane to fit them.
+    let (cache_scroll, cache_expand, cache_total) = {
+        let s = app.state.read();
+        match s.conversation.as_ref() {
+            Some(c) => (c.scroll, c.expand, c.events.len()),
+            None => (0, ExpandMode::Collapsed, 0),
+        }
+    };
+    let footer_lines = build_footer_lines(area.width, cache_scroll, cache_expand, cache_total);
+    // Clamp 1..3 — extreme narrow widths shouldn't let footer eat the body.
+    let footer_h = (footer_lines.len() as u16).clamp(1, 3);
+
+    // Search bar takes one row above the body when there's an active search
+    // (either the user is typing, or a query is committed).
+    let has_search = {
+        let s = app.state.read();
+        s.conversation
+            .as_ref()
+            .and_then(|c| c.search.as_ref())
+            .is_some_and(|sr| sr.editing || !sr.query.is_empty())
+    };
+    let search_h = if has_search { 1 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),
+            Constraint::Length(search_h),
             Constraint::Min(3),
-            Constraint::Length(1),
+            Constraint::Length(footer_h),
         ])
         .split(area);
-    let body_h = chunks[1].height.saturating_sub(2) as usize;
+    let body_h = chunks[2].height.saturating_sub(2) as usize;
 
     // Read the cache once, build lines if needed, and compute clipped scroll
     // + total lines while we still hold the read lock. Everything after this
@@ -72,8 +97,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let (visible, clipped_scroll, total_lines) = build_visible(cache, &path, body_h);
 
     render_header(frame, chunks[0], meta.as_ref(), cache);
-    render_body(frame, chunks[1], cache, visible);
-    render_footer(frame, chunks[2], cache);
+    if has_search {
+        render_search_bar(frame, chunks[1], cache);
+    }
+    render_body(frame, chunks[2], cache, visible);
+    render_footer(frame, chunks[3], &footer_lines);
     drop(state);
 
     // Sync geometry + clipped scroll back so the event handler's bounds math
@@ -119,8 +147,149 @@ fn build_visible(
     let clipped = c.scroll.min(max_scroll);
     let start = clipped as usize;
     let end = (start + body_h).min(total);
-    let vis: Vec<Line<'static>> = cell.lines[start..end].to_vec();
+
+    // Highlight matched lines + mark the "current" match more prominently
+    // (used by `n`/`N` navigation). We rebuild visible lines from the cached
+    // ones so highlight changes don't invalidate the structural cache.
+    let search = c.search.as_ref();
+    let vis: Vec<Line<'static>> = cell.lines[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, line)| {
+            let line_idx = start + offset;
+            highlight_for_search(line, line_idx, search)
+        })
+        .collect();
     (Some(vis), clipped, total as u32)
+}
+
+/// Apply a search-match highlight to a line if it lives in the match list.
+/// The "current" match (the one `n`/`N` is on) gets a brighter style than
+/// other matches so navigation feels responsive even when many lines hit.
+fn highlight_for_search(
+    line: &Line<'static>,
+    line_idx: usize,
+    search: Option<&ViewerSearch>,
+) -> Line<'static> {
+    let Some(search) = search else {
+        return line.clone();
+    };
+    if search.matches.is_empty() {
+        return line.clone();
+    }
+    let pos = search.matches.iter().position(|&i| i == line_idx);
+    let Some(pos) = pos else {
+        return line.clone();
+    };
+    let is_current = pos == search.current;
+    let bg = if is_current { Color::Yellow } else { Color::DarkGray };
+    let fg = Color::Black;
+    let highlight = Style::default().bg(bg).fg(fg).add_modifier(Modifier::BOLD);
+
+    // Re-style each span with the highlight. Keep span structure so existing
+    // role-coloured prefixes still appear (just with the bg overlay).
+    let spans: Vec<Span<'static>> = line
+        .spans
+        .iter()
+        .map(|s| Span::styled(s.content.clone(), highlight))
+        .collect();
+    Line::from(spans)
+}
+
+/// Case-insensitive scan over the flattened render-cache lines. Returns line
+/// indices that contain `query` anywhere in their concatenated text. Empty
+/// query → empty vec (no match concept).
+pub(crate) fn find_matches(lines: &[Line<'static>], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let needle = query.to_lowercase();
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, line)| {
+            let text: String = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .to_lowercase();
+            text.contains(&needle).then_some(idx)
+        })
+        .collect()
+}
+
+/// Recompute matches for the conversation cache and align `current` to the
+/// nearest match >= the current scroll, so `n`/`N` start from where the user
+/// is rather than from match #0. Public so the event handler can call it on
+/// commit and on scroll.
+pub(crate) fn refresh_search_matches(cache: &mut ConversationCache) {
+    let Some(search) = cache.search.as_mut() else {
+        return;
+    };
+    let lines = build_lines(&cache.events, cache.expand);
+    let matches = find_matches(&lines, &search.query);
+    let cursor_line = cache.scroll as usize;
+    let current = matches
+        .iter()
+        .position(|&i| i >= cursor_line)
+        .unwrap_or(0);
+    search.matches = matches;
+    search.current = current;
+}
+
+fn render_search_bar(frame: &mut Frame, area: Rect, cache: Option<&ConversationCache>) {
+    let Some(cache) = cache else {
+        return;
+    };
+    let Some(search) = cache.search.as_ref() else {
+        return;
+    };
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
+    spans.push(Span::styled(
+        format!(" {} ", t("viewer.search.prompt")),
+        Style::default()
+            .fg(theme::accent())
+            .add_modifier(Modifier::BOLD),
+    ));
+    if search.editing {
+        let body = if search.query.is_empty() {
+            t("viewer.search.placeholder").to_string()
+        } else {
+            search.query.clone()
+        };
+        spans.push(Span::styled(
+            format!("{}█", body),
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::styled(
+            format!("`{}` ", search.query),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if search.matches.is_empty() && !search.query.is_empty() {
+        spans.push(Span::styled(
+            format!("  ({})", t("viewer.search.no_match")),
+            theme::muted(),
+        ));
+    } else if !search.matches.is_empty() {
+        spans.push(Span::styled(
+            format!(
+                "  {}/{} {}",
+                search.current + 1,
+                search.matches.len(),
+                t("viewer.search.matches")
+            ),
+            theme::muted(),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn render_header(
@@ -237,67 +406,61 @@ fn render_body(
     frame.render_widget(para, area);
 }
 
-fn render_footer(frame: &mut Frame, area: Rect, cache: Option<&ConversationCache>) {
-    let (scroll, expand, total) = match cache {
-        Some(c) => (c.scroll, c.expand, c.events.len()),
-        None => (0, ExpandMode::Collapsed, 0),
-    };
+/// Build footer chips and pack them into one or more lines fitting `width`.
+/// Each chip is a `[binding-key span, label span]` pair; the trailing
+/// status `[expanded · 123 events · row 7]` chunk rides along as the last
+/// chip so it wraps consistently with the rest.
+fn build_footer_lines(
+    width: u16,
+    scroll: u16,
+    expand: ExpandMode,
+    total: usize,
+) -> Vec<Line<'static>> {
     let expand_label = match expand {
         ExpandMode::Collapsed => t("viewer.collapsed"),
         ExpandMode::Expanded => t("viewer.expanded"),
     };
-    let keybindings = settings::get().keybindings;
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!(" {} ", keybindings.binding_display(KeyAction::ViewerBack)),
-            Style::default(),
-        ),
-        Span::styled(format!("{} ", t("footer.back")), theme::muted()),
-        Span::styled(
-            format!(
-                " {} ",
-                keybindings.binding_display(KeyAction::ViewerScrollDown)
-            ),
-            Style::default(),
-        ),
-        Span::styled(format!("{} ", t("footer.scroll")), theme::muted()),
-        Span::styled(
-            format!(
-                " {} ",
-                keybindings.binding_display(KeyAction::ViewerHalfPageDown)
-            ),
-            Style::default(),
-        ),
-        Span::styled(format!("{} ", t("footer.half_page")), theme::muted()),
-        Span::styled(
-            format!(" {} ", keybindings.binding_display(KeyAction::ViewerTop)),
-            Style::default(),
-        ),
-        Span::styled(format!("{} ", t("footer.top_bottom")), theme::muted()),
-        Span::styled(
-            format!(" {} ", keybindings.binding_display(KeyAction::ViewerExpand)),
-            Style::default(),
-        ),
-        Span::styled(format!("{} ", t("footer.expand_collapse")), theme::muted()),
-        Span::styled(
-            format!(" {} ", keybindings.binding_display(KeyAction::ViewerResume)),
-            Style::default(),
-        ),
-        Span::styled(format!("{} ", t("footer.resume")), theme::muted()),
-        Span::styled(
-            format!(" {} ", keybindings.binding_display(KeyAction::ViewerDelete)),
-            Style::default(),
-        ),
-        Span::styled(format!("{} ", t("footer.delete")), theme::muted()),
-        Span::styled(
+    let kb = settings::get().keybindings;
+
+    let chip = |action: KeyAction, label_key: &str| -> Vec<Span<'static>> {
+        vec![
+            Span::raw(format!(" {} ", kb.binding_display(action))),
+            Span::styled(t(label_key).to_string(), theme::muted()),
+        ]
+    };
+
+    let chips: Vec<Vec<Span<'static>>> = vec![
+        chip(KeyAction::ViewerBack, "footer.back"),
+        chip(KeyAction::ViewerScrollDown, "footer.scroll"),
+        chip(KeyAction::ViewerHalfPageDown, "footer.half_page"),
+        chip(KeyAction::ViewerTop, "footer.top_bottom"),
+        chip(KeyAction::ViewerExpand, "footer.expand_collapse"),
+        chip(KeyAction::ViewerSearchStart, "footer.search"),
+        chip(KeyAction::ViewerSearchNext, "footer.search_next_prev"),
+        chip(KeyAction::ViewerResume, "footer.resume"),
+        chip(KeyAction::ViewerDelete, "footer.delete"),
+        // Status chip — last so it rides whichever line still has room.
+        vec![Span::styled(
             format!(
                 " [{expand_label} · {total} {} · row {scroll}] ",
                 t("viewer.events")
             ),
             theme::muted(),
-        ),
-    ]));
-    frame.render_widget(footer, area);
+        )],
+    ];
+
+    let mut lines = pack_chips(&chips, width);
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    }
+    lines
+}
+
+fn render_footer(frame: &mut Frame, area: Rect, lines: &[Line<'static>]) {
+    let visible_h = area.height as usize;
+    let take = visible_h.min(lines.len()).max(1);
+    let render_lines: Vec<Line<'static>> = lines.iter().take(take).cloned().collect();
+    frame.render_widget(Paragraph::new(render_lines), area);
 }
 
 fn build_lines(events: &[ConversationEvent], expand: ExpandMode) -> Vec<Line<'static>> {
@@ -443,5 +606,131 @@ fn plural(n: usize) -> &'static str {
         ""
     } else {
         "s"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn footer_wraps_to_multiple_lines_on_narrow_width() {
+        let _guard = crate::settings::test_lock();
+        let original = settings::get().keybindings;
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        // 80 cols: way too narrow for 7 chips + status. Expect ≥ 2 lines.
+        let lines = build_footer_lines(80, 0, ExpandMode::Collapsed, 0);
+        assert!(
+            lines.len() >= 2,
+            "expected wrap on width 80, got {} lines",
+            lines.len()
+        );
+
+        // 200 cols: plenty of space, single line should still suffice.
+        let lines_wide = build_footer_lines(200, 0, ExpandMode::Collapsed, 0);
+        assert_eq!(lines_wide.len(), 1);
+
+        crate::settings::settings().write().keybindings = original;
+    }
+
+    #[test]
+    fn footer_status_chip_present_in_packed_lines() {
+        let _guard = crate::settings::test_lock();
+        let original = settings::get().keybindings;
+        crate::settings::settings().write().keybindings = crate::settings::KeyBindings::default();
+
+        let lines = build_footer_lines(120, 42, ExpandMode::Expanded, 7);
+        let all_text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(all_text.contains("row 42"), "row marker missing: {all_text}");
+        assert!(all_text.contains('7'), "events count missing: {all_text}");
+
+        crate::settings::settings().write().keybindings = original;
+    }
+
+    fn line(s: &str) -> Line<'static> {
+        Line::from(Span::raw(s.to_string()))
+    }
+
+    #[test]
+    fn find_matches_is_case_insensitive_and_returns_indices() {
+        let lines = vec![
+            line("Hello World"),
+            line("foo bar"),
+            line("THE WORLD"),
+            line(""),
+        ];
+        assert_eq!(find_matches(&lines, "world"), vec![0, 2]);
+        assert_eq!(find_matches(&lines, "WoRlD"), vec![0, 2]);
+        assert_eq!(find_matches(&lines, "bar"), vec![1]);
+        assert_eq!(find_matches(&lines, "missing"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn find_matches_empty_query_returns_empty() {
+        let lines = vec![line("anything"), line("else")];
+        assert_eq!(find_matches(&lines, ""), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn find_matches_handles_multi_span_lines() {
+        // A line with multiple spans (e.g. role-coloured prefix + body) should
+        // match across span boundaries — the search treats the whole line as
+        // concatenated text. Reproducing this in tests is critical because
+        // build_lines uses styled spans for thinking/tool blocks.
+        let multi = Line::from(vec![
+            Span::raw("│ "),
+            Span::styled("error: ".to_string(), Style::default().fg(Color::Red)),
+            Span::raw("could not parse"),
+        ]);
+        let matches = find_matches(&[multi], "error: could");
+        assert_eq!(matches, vec![0]);
+    }
+
+    #[test]
+    fn highlight_for_search_returns_clone_when_no_search_or_no_match() {
+        let line = line("hello");
+        // No search → identity.
+        let out = highlight_for_search(&line, 0, None);
+        assert_eq!(out.spans.len(), 1);
+        // Search but line index not in matches → identity.
+        let search = ViewerSearch {
+            query: "bar".into(),
+            matches: vec![5, 7],
+            current: 0,
+            editing: false,
+        };
+        let out = highlight_for_search(&line, 3, Some(&search));
+        assert_eq!(out.spans.len(), 1);
+        assert_eq!(out.spans[0].content.as_ref(), "hello");
+    }
+
+    #[test]
+    fn highlight_for_search_marks_current_match_distinctly() {
+        let line = line("matched");
+        let search = ViewerSearch {
+            query: "match".into(),
+            matches: vec![0, 5],
+            current: 0,
+            editing: false,
+        };
+        let out = highlight_for_search(&line, 0, Some(&search));
+        // Style overlaid: bg should be Yellow (current), fg Black, BOLD.
+        assert_eq!(out.spans[0].style.bg, Some(Color::Yellow));
+        assert_eq!(out.spans[0].style.fg, Some(Color::Black));
+
+        // A non-current match (line index 5) gets DarkGray bg instead.
+        let search2 = ViewerSearch {
+            query: "match".into(),
+            matches: vec![0, 5],
+            current: 0, // current is index 0, so line 5 is "other match"
+            editing: false,
+        };
+        let out2 = highlight_for_search(&line, 5, Some(&search2));
+        assert_eq!(out2.spans[0].style.bg, Some(Color::DarkGray));
     }
 }
