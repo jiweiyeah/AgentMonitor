@@ -1462,8 +1462,110 @@ fn open_terminal_with_command(
         TerminalApp::Terminal => open_terminal_applescript(cwd, cmd),
         TerminalApp::ITerm2 => open_iterm_applescript(cwd, cmd),
         TerminalApp::Warp => open_warp(cwd, cmd),
+        TerminalApp::WindowsTerminal => open_windows_terminal(cwd, cmd),
+        TerminalApp::PowerShell => open_powershell(cwd, cmd),
+        TerminalApp::Cmd => open_cmd(cwd, cmd),
         _ => open_cli_terminal(terminal, cwd, cmd),
     }
+}
+
+/// Build the command-line that runs in the user's home shell after `cd`.
+/// Same single-quote escaping as `build_cd_command` but for Windows we use
+/// `cd /d` (cmd.exe) so cross-drive jumps work without a sneaky `pushd`.
+#[cfg(target_os = "windows")]
+fn build_cd_command_windows(cwd: Option<&Path>, cmd: &str) -> String {
+    match cwd {
+        Some(dir) => {
+            let escaped = dir.display().to_string().replace('"', "\\\"");
+            format!("cd /d \"{escaped}\" && {cmd}")
+        }
+        None => cmd.to_string(),
+    }
+}
+
+/// Build a PowerShell-friendly composite. PS uses `Set-Location` and the
+/// statement separator is `;`. Single quotes inside the path are doubled
+/// for PowerShell's literal-string escaping.
+#[cfg(target_os = "windows")]
+fn build_cd_command_powershell(cwd: Option<&Path>, cmd: &str) -> String {
+    match cwd {
+        Some(dir) => {
+            let escaped = dir.display().to_string().replace('\'', "''");
+            format!("Set-Location -LiteralPath '{escaped}'; {cmd}")
+        }
+        None => cmd.to_string(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_terminal(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    let cwd_str = cwd
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| ".".to_string());
+    // wt.exe accepts `-d <dir>` for the new tab's working directory and
+    // forwards the rest of argv to the chosen profile's command. We use
+    // `cmd /k` so the user gets a persistent shell window rather than one
+    // that exits immediately when `cmd` finishes.
+    std::process::Command::new("wt.exe")
+        .arg("-d")
+        .arg(&cwd_str)
+        .arg("cmd")
+        .arg("/k")
+        .arg(cmd)
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_windows_terminal(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
+    anyhow::bail!("Windows Terminal is only available on Windows")
+}
+
+#[cfg(target_os = "windows")]
+fn open_powershell(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    // Prefer pwsh (cross-platform Core), fall back to powershell.exe.
+    let exe = if crate::settings::which_exists("pwsh.exe")
+        || crate::settings::which_exists("pwsh")
+    {
+        "pwsh.exe"
+    } else {
+        "powershell.exe"
+    };
+    let composite = build_cd_command_powershell(cwd, cmd);
+    // -NoExit keeps the window open after the command runs so the user can
+    // see output. -Command is the argument that takes our composite.
+    std::process::Command::new(exe)
+        .arg("-NoExit")
+        .arg("-Command")
+        .arg(composite)
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_powershell(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
+    anyhow::bail!("PowerShell is only available on Windows")
+}
+
+#[cfg(target_os = "windows")]
+fn open_cmd(cwd: Option<&Path>, cmd: &str) -> anyhow::Result<()> {
+    let composite = build_cd_command_windows(cwd, cmd);
+    // `start` opens a new console window. The empty quoted string is the
+    // window title — required positional arg when title contains spaces.
+    std::process::Command::new("cmd.exe")
+        .arg("/c")
+        .arg("start")
+        .arg("")
+        .arg("cmd.exe")
+        .arg("/k")
+        .arg(composite)
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_cmd(_cwd: Option<&Path>, _cmd: &str) -> anyhow::Result<()> {
+    anyhow::bail!("cmd.exe is only available on Windows")
 }
 
 #[cfg(target_os = "macos")]

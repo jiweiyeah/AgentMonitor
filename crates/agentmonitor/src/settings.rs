@@ -197,20 +197,34 @@ pub enum TerminalApp {
     Kitty,
     WezTerm,
     Warp,
+    /// Windows Terminal (`wt.exe`). Spawns `wt.exe -d <cwd> cmd /k <command>`.
+    WindowsTerminal,
+    /// PowerShell (Core or Windows PowerShell). Falls back to whichever is
+    /// on PATH; uses `Start-Process` to open a new window so we don't take
+    /// over the current console.
+    PowerShell,
+    /// Legacy `cmd.exe`. Last-resort fallback when nothing fancier is
+    /// installed; we intentionally don't prefer it because every modern
+    /// Windows ships at least Windows Terminal or PowerShell.
+    Cmd,
 }
 
 impl Default for TerminalApp {
     fn default() -> Self {
-        // Pick the first available terminal, falling back to Terminal on macOS
-        // or the first CLI-based option on Linux.
-        Self::detect()
-            .first()
-            .copied()
-            .unwrap_or(if cfg!(target_os = "macos") {
-                TerminalApp::Terminal
-            } else {
-                TerminalApp::Alacritty
-            })
+        // Pick the first available terminal. Platform-specific fallbacks:
+        // - macOS → Terminal.app (always installed)
+        // - Windows → WindowsTerminal (Win11 default), then PowerShell, then Cmd
+        // - Linux → Alacritty (most common modern terminal in CLI workflows)
+        if let Some(first) = Self::detect().first().copied() {
+            return first;
+        }
+        if cfg!(target_os = "macos") {
+            TerminalApp::Terminal
+        } else if cfg!(target_os = "windows") {
+            TerminalApp::WindowsTerminal
+        } else {
+            TerminalApp::Alacritty
+        }
     }
 }
 
@@ -224,6 +238,9 @@ impl TerminalApp {
             TerminalApp::Kitty,
             TerminalApp::WezTerm,
             TerminalApp::Warp,
+            TerminalApp::WindowsTerminal,
+            TerminalApp::PowerShell,
+            TerminalApp::Cmd,
         ]
     }
 
@@ -236,6 +253,9 @@ impl TerminalApp {
             TerminalApp::Kitty => "Kitty",
             TerminalApp::WezTerm => "WezTerm",
             TerminalApp::Warp => "Warp",
+            TerminalApp::WindowsTerminal => "Windows Terminal",
+            TerminalApp::PowerShell => "PowerShell",
+            TerminalApp::Cmd => "Cmd",
         }
     }
 
@@ -270,6 +290,19 @@ impl TerminalApp {
             TerminalApp::Warp => {
                 Path::new("/Applications/Warp.app").exists()
                     || home_applications().join("Warp.app").exists()
+            }
+            TerminalApp::WindowsTerminal => {
+                cfg!(target_os = "windows") && (which_exists("wt.exe") || which_exists("wt"))
+            }
+            TerminalApp::PowerShell => {
+                cfg!(target_os = "windows")
+                    && (which_exists("pwsh.exe")
+                        || which_exists("pwsh")
+                        || which_exists("powershell.exe")
+                        || which_exists("powershell"))
+            }
+            TerminalApp::Cmd => {
+                cfg!(target_os = "windows") && (which_exists("cmd.exe") || which_exists("cmd"))
             }
         }
     }
