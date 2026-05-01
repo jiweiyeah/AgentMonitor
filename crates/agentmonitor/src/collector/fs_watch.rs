@@ -321,6 +321,7 @@ pub(crate) fn replace_preserving_tokens(
         Arc::new(merged)
     };
     s.sessions = new_arc;
+    s.session_generation = s.session_generation.wrapping_add(1);
     s.dirty = true;
 }
 

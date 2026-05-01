@@ -217,6 +217,13 @@ pub struct AppState {
     /// the state lock immediately after grabbing the Arc — without the Arc,
     /// concurrent writes would be visible mid-render.
     pub sessions: Arc<Vec<SessionMeta>>,
+    /// Monotone counter incremented on every `mutate_sessions` call (and by
+    /// `initial_scan` / direct assignment in fs_watch). Renderers that cache
+    /// derived data over `sessions` use this as the cache key — `Arc::as_ptr`
+    /// is unreliable because `Arc::make_mut` only allocates a new Arc when
+    /// there are other holders, so an in-place mutation by the sole owner
+    /// would silently reuse the same pointer and miss invalidation.
+    pub session_generation: u64,
     pub selected_session: usize,
     pub dirty: bool,
     /// Cached preview + full stats for the currently selected session.
@@ -242,12 +249,18 @@ impl AppState {
     /// allocates a single new Vec when there is — exactly the behavior we
     /// want: dashboards holding read-only Arcs see a stable snapshot while
     /// the writer makes its edit.
+    ///
+    /// Bumps `session_generation` so cache consumers (dashboard aggregates,
+    /// future query memoization) can detect "anything inside sessions
+    /// changed", regardless of whether `Arc::make_mut` actually reallocated.
     pub fn mutate_sessions<F, R>(&mut self, f: F) -> R
     where
         F: FnOnce(&mut Vec<SessionMeta>) -> R,
     {
         let inner = Arc::make_mut(&mut self.sessions);
-        f(inner)
+        let r = f(inner);
+        self.session_generation = self.session_generation.wrapping_add(1);
+        r
     }
 
     /// Compute the indices of `sessions` that pass `filter` and are sorted
@@ -655,6 +668,7 @@ impl App {
         all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         let mut s = self.state.write();
         s.sessions = Arc::new(all);
+        s.session_generation = s.session_generation.wrapping_add(1);
         s.selected_session = 0;
         s.dirty = true;
         Ok(())
@@ -1020,6 +1034,7 @@ mod tests {
             conversation: Some(ConversationCache::loading(remove_path.clone())),
             toast: None,
             show_help: false,
+            session_generation: 0,
         };
 
         state.remove_session_path(&remove_path);
@@ -1074,6 +1089,7 @@ mod tests {
             conversation: Some(ConversationCache::loading(keep_path.clone())),
             toast: None,
             show_help: false,
+            session_generation: 0,
         };
 
         state.remove_session_path(&remove_path);

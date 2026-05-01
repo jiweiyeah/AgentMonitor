@@ -1,3 +1,4 @@
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Timelike, Utc};
@@ -9,6 +10,7 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use crate::adapter::types::agent_display_name;
+use crate::adapter::types::SessionMeta;
 use crate::app::App;
 use crate::i18n::t;
 use crate::settings::{self, TokenUnit};
@@ -20,16 +22,69 @@ use crate::tui::theme;
 use crate::tui::widgets::{braille_spark, human_bytes, pad_display_width, trend_arrow};
 use crate::tui::{DASHBOARD_HSTACK_MIN_WIDTH, DASHBOARD_TOKENS_STRIP_MIN_HEIGHT};
 
-pub fn render(frame: &mut Frame, area: Rect, app: &App) {
-    let state = app.state.read();
-    let sessions = state.sessions.clone();
-    drop(state);
+/// Pure functions of `sessions` cached so the renderer can skip recomputing
+/// them between non-mutation `dirty` notifies. Process-sampler ticks fire 1-2
+/// times per second; without this cache, every tick walks all sessions five
+/// times (once each for last24h, tokens_by_agent, aggregate_cost, top_projects,
+/// activity_buckets).
+///
+/// Invalidation: keyed by `AppState.session_generation` plus the bool that
+/// flips with the user's "include cache tokens in Σ" preference. The
+/// generation counter is bumped on every `mutate_sessions` call (and on direct
+/// `s.sessions = ...` assignments in collectors). We deliberately don't use
+/// `Arc::as_ptr(&sessions)` because `Arc::make_mut` only allocates a new Arc
+/// when there are *other* holders; an in-place mutation by the sole owner
+/// silently reuses the same pointer and would slip past pointer-equality.
+#[derive(Debug, Clone)]
+struct DashboardAggregates {
+    generation: u64,
+    include_cache: bool,
+    last24h: usize,
+    agent_rows: Vec<AgentTokenRow>,
+    total_tokens: u64,
+    total_cost: f64,
+    activity_24h: Vec<u64>,
+    /// Capped at 100 in the cache so we don't invalidate just because the
+    /// terminal grew taller; the renderer takes only as many rows as it has
+    /// space for.
+    top_projects: Vec<ProjectRow>,
+    /// Time the cache was built — used to invalidate after 60 s elapsed so
+    /// the time-relative `last24h` count rolls forward even when sessions
+    /// don't mutate (e.g. an idle dashboard).
+    computed_at: SystemTime,
+}
 
-    let now = chrono::Utc::now();
-    let now_unix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+fn aggregate_cache() -> &'static Mutex<Option<DashboardAggregates>> {
+    static CELL: OnceLock<Mutex<Option<DashboardAggregates>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// Return cached aggregates if `session_generation` and the include_cache
+/// preference haven't changed and the cache isn't more than 60 s stale.
+/// Otherwise compute fresh, store, return.
+fn aggregates_for(
+    sessions: &std::sync::Arc<Vec<SessionMeta>>,
+    generation: u64,
+    include_cache: bool,
+    agent_ids: &[&'static str],
+    now: DateTime<Utc>,
+) -> DashboardAggregates {
+    {
+        let cache = aggregate_cache().lock().expect("aggregate cache poisoned");
+        if let Some(cached) = cache.as_ref() {
+            let stale = cached
+                .computed_at
+                .elapsed()
+                .map(|d| d.as_secs() >= 60)
+                .unwrap_or(true);
+            if cached.generation == generation
+                && cached.include_cache == include_cache
+                && !stale
+            {
+                return cached.clone();
+            }
+        }
+    }
 
     let last24h = sessions
         .iter()
@@ -39,15 +94,49 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or(false)
         })
         .count();
-
-    let agent_ids: Vec<&'static str> = app.adapters.iter().map(|a| a.id()).collect();
-    let agent_rows = tokens_by_agent(&sessions, &agent_ids);
-    let include_cache = settings::get().include_cache_in_total;
+    let agent_rows = tokens_by_agent(sessions, agent_ids);
     let total_tokens: u64 = agent_rows
         .iter()
         .map(|r| r.tokens.total_with_preference(include_cache))
         .sum();
-    let total_cost = crate::pricing::aggregate_cost(&sessions);
+    let total_cost = crate::pricing::aggregate_cost(sessions);
+    let activity_24h = activity_buckets(sessions, now, 24);
+    let top_projects = top_projects(sessions, 100);
+
+    let fresh = DashboardAggregates {
+        generation,
+        include_cache,
+        last24h,
+        agent_rows,
+        total_tokens,
+        total_cost,
+        activity_24h,
+        top_projects,
+        computed_at: SystemTime::now(),
+    };
+    *aggregate_cache().lock().expect("aggregate cache poisoned") = Some(fresh.clone());
+    fresh
+}
+
+pub fn render(frame: &mut Frame, area: Rect, app: &App) {
+    let (sessions, generation) = {
+        let state = app.state.read();
+        (state.sessions.clone(), state.session_generation)
+    };
+
+    let now = chrono::Utc::now();
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let agent_ids: Vec<&'static str> = app.adapters.iter().map(|a| a.id()).collect();
+    let include_cache = settings::get().include_cache_in_total;
+    let agg = aggregates_for(&sessions, generation, include_cache, &agent_ids, now);
+    let last24h = agg.last24h;
+    let agent_rows = agg.agent_rows;
+    let total_tokens = agg.total_tokens;
+    let total_cost = agg.total_cost;
 
     // Token trend buckets: 30 buckets of 1 minute = ~30 minutes of history,
     // matching the rate caption window. The TokenTrend lives in App so it
@@ -132,12 +221,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .split(chunks[1])
     };
 
-    let hist = activity_buckets(&sessions, now, 24);
-    render_activity(frame, middle[0], &hist, now);
+    // Activity buckets and top projects come from the cached aggregates.
+    // Top projects was capped at 100 in the cache so we trim to what the pane
+    // can actually show.
+    let hist = &agg.activity_24h;
+    render_activity(frame, middle[0], hist, now);
 
     // Cap the list at what fits in the pane so the block never overflows.
     let top_n = middle[1].height.saturating_sub(3) as usize;
-    let projects = top_projects(&sessions, top_n.max(1));
+    let projects: Vec<ProjectRow> = agg
+        .top_projects
+        .iter()
+        .take(top_n.max(1))
+        .cloned()
+        .collect();
     let project_focused =
         app.dashboard_cursor == crate::app::DashboardCursor::Project;
     let selected_project = if project_focused {
@@ -992,5 +1089,97 @@ mod tests {
         }
         let (a, p) = (activity_y.expect("activity"), projects_y.expect("projects"));
         assert!(a < p, "activity (y={a}) should sit above projects (y={p})");
+    }
+
+    #[test]
+    fn aggregates_cache_hits_on_same_generation() {
+        // Same generation + same Arc → second call returns the cached snapshot
+        // unchanged (verified via `computed_at` equality, which would shift on
+        // a fresh recompute).
+        use std::sync::Arc;
+        let _guard = crate::settings::test_lock();
+
+        let now = chrono::Utc::now();
+        let sessions = Arc::new(vec![SessionMeta {
+            agent: "claude",
+            id: "x".into(),
+            path: std::path::PathBuf::from("/tmp/x.jsonl"),
+            cwd: None,
+            model: None,
+            version: None,
+            git_branch: None,
+            source: None,
+            started_at: None,
+            updated_at: Some(now),
+            message_count: 0,
+            tokens: crate::adapter::types::TokenStats::default(),
+            status: crate::adapter::types::SessionStatus::Active,
+            byte_offset: 0,
+            size_bytes: 0,
+        }]);
+
+        let agg1 = aggregates_for(&sessions, 42, true, &["claude"], now);
+        assert_eq!(agg1.last24h, 1);
+        assert_eq!(agg1.generation, 42);
+
+        // Second call with the same generation must hit the cache — same
+        // `computed_at` proves we returned the snapshot unmodified.
+        let agg2 = aggregates_for(&sessions, 42, true, &["claude"], now);
+        assert_eq!(agg2.computed_at, agg1.computed_at);
+    }
+
+    #[test]
+    fn aggregates_cache_misses_on_new_generation() {
+        // The whole point of the generation counter: an in-place mutation
+        // (like Arc::make_mut on the sole owner, which keeps the Arc pointer
+        // identical) still bumps the cache. Simulate that by passing a new
+        // generation number.
+        use std::sync::Arc;
+        let _guard = crate::settings::test_lock();
+
+        let now = chrono::Utc::now();
+        let mut sessions_vec = vec![SessionMeta {
+            agent: "claude",
+            id: "first".into(),
+            path: std::path::PathBuf::from("/tmp/first.jsonl"),
+            cwd: None,
+            model: None,
+            version: None,
+            git_branch: None,
+            source: None,
+            started_at: None,
+            updated_at: Some(now),
+            message_count: 0,
+            tokens: crate::adapter::types::TokenStats::default(),
+            status: crate::adapter::types::SessionStatus::Active,
+            byte_offset: 0,
+            size_bytes: 0,
+        }];
+        let sessions_v1 = Arc::new(sessions_vec.clone());
+        let agg1 = aggregates_for(&sessions_v1, 1, true, &["claude"], now);
+        assert_eq!(agg1.last24h, 1);
+
+        // Mutate, bump generation, ask again.
+        sessions_vec.push(SessionMeta {
+            agent: "claude",
+            id: "second".into(),
+            path: std::path::PathBuf::from("/tmp/second.jsonl"),
+            cwd: None,
+            model: None,
+            version: None,
+            git_branch: None,
+            source: None,
+            started_at: None,
+            updated_at: Some(now),
+            message_count: 0,
+            tokens: crate::adapter::types::TokenStats::default(),
+            status: crate::adapter::types::SessionStatus::Active,
+            byte_offset: 0,
+            size_bytes: 0,
+        });
+        let sessions_v2 = Arc::new(sessions_vec);
+        let agg2 = aggregates_for(&sessions_v2, 2, true, &["claude"], now);
+        assert_eq!(agg2.last24h, 2);
+        assert_ne!(agg1.generation, agg2.generation);
     }
 }

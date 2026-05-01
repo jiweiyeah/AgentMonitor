@@ -2258,6 +2258,7 @@ mod tests {
                 conversation: None,
                 toast: None,
                 show_help: false,
+                session_generation: 0,
             })),
             metrics: Arc::new(MetricsStore::new(8)),
             adapters: vec![
