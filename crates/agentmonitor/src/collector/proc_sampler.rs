@@ -97,6 +97,13 @@ pub async fn run(
             if wrapper_pids.contains(&pid) {
                 continue;
             }
+            // macOS-only: ask the kernel for the GUI app / terminal that
+            // originated this PID. On Linux/Windows this returns None. The
+            // call is one syscall + two libproc helpers — cheap enough to do
+            // every tick instead of caching, and refreshing handles the case
+            // where an early tick raced before the kernel had populated the
+            // entry for a brand-new PID.
+            let responsible = crate::collector::responsible::for_pid(pid);
             let sample = ProcessSample {
                 unix_ts: now,
                 rss_kb: cand.rss_kb,
@@ -109,6 +116,7 @@ pub async fn run(
                 cand.cmd,
                 cand.cwd,
                 cand.started_unix,
+                responsible,
                 sample,
             );
             alive.insert(pid);

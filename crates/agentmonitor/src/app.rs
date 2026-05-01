@@ -827,6 +827,8 @@ mod tests {
             cwd: Some("/repos/AgentMonitor".into()),
             started_unix: 0,
             samples: VecDeque::new(),
+            responsible_pid: None,
+            responsible_name: None,
         };
 
         let idx = state.best_session_index_for_process(&process);

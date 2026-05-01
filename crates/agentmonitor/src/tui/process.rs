@@ -43,6 +43,7 @@ fn render_table(
     let header = Row::new(vec![
         Cell::from("Agent"),
         Cell::from("PID"),
+        Cell::from("Launched by"),
         Cell::from("CWD"),
         Cell::from("RSS"),
         Cell::from("CPU %"),
@@ -66,9 +67,22 @@ fn render_table(
                 .map(|a| a.display_name())
                 .unwrap_or(p.agent);
             let cwd = p.cwd.as_deref().unwrap_or("-");
+            // Show the originator as "name (pid)". When the responsible PID
+            // equals the queried PID, the process is its own top-level app
+            // (e.g. Ghostty, Code, the launchd-launched daemon), so just the
+            // name reads cleanly without redundant self-reference. When
+            // resolution failed (older macOS / SIP / non-mac) fall through to
+            // a dash so a column of mostly-resolved rows stays visually
+            // aligned.
+            let launcher = match (&p.responsible_name, p.responsible_pid) {
+                (Some(name), Some(rpid)) if rpid == p.pid => name.clone(),
+                (Some(name), Some(rpid)) => format!("{name} ({rpid})"),
+                _ => "-".to_string(),
+            };
             Row::new(vec![
                 Cell::from(agent_label),
                 Cell::from(p.pid.to_string()),
+                Cell::from(launcher),
                 Cell::from(shorten_path(cwd, 40)),
                 Cell::from(human_bytes(p.latest_rss_kb())),
                 Cell::from(format!("{:.1}", p.latest_cpu())),
@@ -80,6 +94,7 @@ fn render_table(
     let widths = [
         Constraint::Length(14),
         Constraint::Length(8),
+        Constraint::Length(20),
         Constraint::Min(20),
         Constraint::Length(10),
         Constraint::Length(8),

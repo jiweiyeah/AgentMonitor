@@ -8,6 +8,53 @@ use unicode_width::UnicodeWidthStr;
 use crate::adapter::types::SessionStatus;
 use crate::tui::theme;
 
+/// Pack a list of "chips" (each chip is a small `Vec<Span>`) into one or more
+/// `Line`s that each fit `width` columns. Chips are joined with two spaces;
+/// a chip that's wider than `width` on its own gets its own line — we never
+/// drop content, only wrap.
+///
+/// Used by the Viewer footer (key bindings + status chip) and by Dashboard's
+/// agent-summary row, both of which have an unknown number of small items
+/// that need to flow across one or more lines depending on terminal width.
+pub fn pack_chips(chips: &[Vec<Span<'static>>], width: u16) -> Vec<Line<'static>> {
+    if chips.is_empty() || width == 0 {
+        return Vec::new();
+    }
+    const SEP: &str = "  ";
+    let sep_w = SEP.len();
+    let budget = width as usize;
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current: Vec<Span<'static>> = Vec::new();
+    let mut current_w: usize = 0;
+
+    for chip in chips {
+        let chip_w: usize = chip
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        let need = if current.is_empty() {
+            chip_w
+        } else {
+            current_w + sep_w + chip_w
+        };
+        if need > budget && !current.is_empty() {
+            lines.push(Line::from(std::mem::take(&mut current)));
+            current_w = 0;
+        }
+        if !current.is_empty() {
+            current.push(Span::raw(SEP));
+            current_w += sep_w;
+        }
+        current.extend(chip.iter().cloned());
+        current_w += chip_w;
+    }
+    if !current.is_empty() {
+        lines.push(Line::from(current));
+    }
+    lines
+}
+
 /// Left-pad `s` with spaces to reach at least `target_cols` terminal columns.
 ///
 /// Rust's built-in `format!("{:<N}", s)` pads by char count, which produces
@@ -231,5 +278,43 @@ mod tests {
         // Over-width input: we refuse to truncate, just hand it back.
         let s = "very long label that exceeds target";
         assert_eq!(pad_display_width(s, 5), s);
+    }
+
+    #[test]
+    fn pack_chips_packs_short_items_into_one_line() {
+        let chip = |s: &str| vec![Span::raw(s.to_string())];
+        let chips = vec![chip("aa"), chip("bb"), chip("cc")];
+        let lines = pack_chips(&chips, 80);
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn pack_chips_wraps_when_budget_runs_out() {
+        let chip = |s: &str| vec![Span::raw(s.to_string())];
+        // Three 5-char chips with 2-space separators need 5+2+5+2+5 = 19 cols
+        // for one line. With a budget of 12 we expect two lines.
+        let chips = vec![chip("aaaaa"), chip("bbbbb"), chip("ccccc")];
+        let lines = pack_chips(&chips, 12);
+        assert!(lines.len() >= 2, "expected wrap, got {} lines", lines.len());
+    }
+
+    #[test]
+    fn pack_chips_oversized_item_gets_its_own_line() {
+        // Pathological: a single chip wider than the budget. We still emit it
+        // on its own line rather than dropping data.
+        let chips = vec![
+            vec![Span::raw("aa".to_string())],
+            vec![Span::raw("very-long-chip-that-exceeds-budget".to_string())],
+            vec![Span::raw("bb".to_string())],
+        ];
+        let lines = pack_chips(&chips, 8);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn pack_chips_empty_or_zero_width_returns_empty() {
+        assert!(pack_chips(&[], 80).is_empty());
+        let chips = vec![vec![Span::raw("x".to_string())]];
+        assert!(pack_chips(&chips, 0).is_empty());
     }
 }
