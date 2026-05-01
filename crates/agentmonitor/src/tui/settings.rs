@@ -193,17 +193,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     ));
 
     let mut items = items;
-    let url = "https://github.com/jiweiyeah/AgentMonitor";
-    // OSC 8 hyperlink escape sequences make the URL clickable in terminals
-    // that support the protocol (iTerm2, Ghostty, Kitty, Windows Terminal, etc.).
-    let osc8_start = format!("\x1b]8;;{}\x1b\\", url);
-    let osc8_end = "\x1b]8;;\x1b\\";
-    let link_text = format!(
-        "{}{}{}",
-        osc8_start,
-        pad_display_width("github.com/jiweiyeah/AgentMonitor", 24),
-        osc8_end
-    );
+    // GitHub link row. We render plain text — embedding OSC 8 hyperlink escapes
+    // (`\x1b]8;;<URL>\x1b\\…\x1b]8;;\x1b\\`) inside a `Span::styled` does NOT
+    // work: ratatui's `Buffer::set_stringn` filters out every grapheme that
+    // contains a control character (see ratatui/ratatui#902), which strips the
+    // `\x1b` bytes but leaves `]8;;https://…\` and the closing `]8;;\` as
+    // visible text. The result is a value column wildly wider than 24 cells
+    // that overflows neighboring spans and renders as different garbage on
+    // every redraw depending on terminal width and clipping.
+    //
+    // Pressing Enter on this row already opens the browser via the keymap, so
+    // the loss of click-to-open in OSC-8-aware terminals is acceptable; the
+    // alternative (per-cell `set_symbol` hack from ratatui's hyperlink example)
+    // would push raw escapes through a side channel and is overkill here.
     items.push(ListItem::new(Line::from(vec![
         Span::styled(
             pad_display_width("GitHub", 28),
@@ -212,7 +214,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            link_text,
+            pad_display_width("github.com/jiweiyeah/AgentMonitor", 36),
             Style::default()
                 .fg(theme::accent())
                 .add_modifier(Modifier::BOLD),
