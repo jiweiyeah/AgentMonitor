@@ -282,6 +282,10 @@ cargo clippy -p agentmonitor --all-targets -- -D warnings
 
 Adapter parsing changes should include table-driven tests using `serde_json::json!` fixtures.
 
+## Friend Links
+
+- [LINUX DO](https://linux.do) — A community for tech enthusiasts.
+
 ## License
 
 [MIT](LICENSE)

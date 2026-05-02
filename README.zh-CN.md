@@ -282,6 +282,10 @@ cargo clippy -p agentmonitor --all-targets -- -D warnings
 
 Adapter 解析相关的改动请附带使用 `serde_json::json!` 构造的表驱动测试。
 
+## 友情链接
+
+- [LINUX DO](https://linux.do) — 技术爱好者社区。
+
 ## 许可证
 
 [MIT](LICENSE)
