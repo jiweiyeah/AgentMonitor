@@ -1,6 +1,6 @@
 {
   "name": "@yeheboo/agentmonitor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance TUI to monitor Claude Code / Codex sessions and processes",
   "license": "MIT",
   "type": "module",
@@ -26,11 +26,11 @@
     "cli"
   ],
   "optionalDependencies": {
-    "agentmonitor-darwin-arm64": "0.1.0",
-    "agentmonitor-darwin-x64": "0.1.0",
-    "agentmonitor-linux-arm64-gnu": "0.1.0",
-    "agentmonitor-linux-x64-gnu": "0.1.0",
-    "agentmonitor-win32-arm64": "0.1.0",
-    "agentmonitor-windows-x64": "0.1.0"
+    "agentmonitor-darwin-arm64": "0.2.0",
+    "agentmonitor-darwin-x64": "0.2.0",
+    "agentmonitor-linux-arm64-gnu": "0.2.0",
+    "agentmonitor-linux-x64-gnu": "0.2.0",
+    "agentmonitor-win32-arm64": "0.2.0",
+    "agentmonitor-windows-x64": "0.2.0"
   }
 }

@@ -1,6 +1,6 @@
 {
   "name": "agentmonitor-darwin-x64",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "agent-monitor native binary for macOS / x86_64",
   "license": "MIT",
   "os": ["darwin"],
