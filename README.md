@@ -25,12 +25,16 @@ A high-performance terminal UI for monitoring AI coding agent sessions in real t
 ## Features
 
 - **Real-time session tracking** — filesystem-event-driven watcher with 10s reconcile fallback
-- **Live process metrics** — periodic CPU and RSS sampling for running agent processes
+- **Live process metrics** — periodic CPU and RSS sampling for running agent processes; resolved to the launcher app and responsible PID
 - **Token accounting** — accurate per-session input/output/cache token totals with monotone-nondecreasing guarantees
-- **Dashboard** — top projects by session count, aggregate token usage, active processes
-- **Session browser** — filter by agent, status, cwd, branch, or model; sort by updated time, tokens, size, messages, or status
+- **Dashboard** — top projects, tokens-by-agent breakdown, 24h activity sparkline, aggregate USD cost & token rate, active processes
+- **Session browser** — filter by agent, status, cwd, branch or model; sort by updated time, tokens, size, messages or status; bookmark sessions to float them to the top
 - **Conversation viewer** — scroll through full conversation history with collapsible thinking blocks, tool calls, and attachments
-- **Session restore** — resume a session in a new terminal with a single keypress
+- **Viewer search** — `/` to search inside a session, `n` / `N` to jump between matches with on-screen counter
+- **Export & copy** — render the current viewer session to Markdown on disk or pipe it straight to the clipboard
+- **Session restore** — resume a session in a new terminal (macOS Terminal / iTerm2 / Warp · Ghostty / Alacritty / Kitty / WezTerm · Windows Terminal / PowerShell / cmd.exe)
+- **Diagnostics panel** — Settings tab surfaces token-refresh / cache / fs-watch counters for live debugging
+- **Configurable keybindings** — every action is rebindable; settings persist to disk
 - **One-click update** — `agent-monitor update` checks for newer versions and upgrades in place
 - **Cross-platform** — macOS (ARM64, x64), Linux (ARM64, x64), Windows (ARM64, x64)
 
@@ -106,16 +110,26 @@ The update command detects your package manager (npm / yarn / pnpm / bun) and ru
 agent-monitor [OPTIONS]
 
 Options:
-  --once-and-exit          Print a snapshot of all sessions to stdout and exit
-  --sample-interval <SEC>  Process sampling interval in seconds [default: 2]
-  --debug                  Write tracing logs to the platform cache directory
-  -h, --help               Print help
-  -V, --version            Print version
+  --once-and-exit              Print a snapshot of all sessions to stdout and exit
+  --sample-interval <SEC>      Process sampling interval in seconds [default: 2]
+  --debug                      Write tracing logs to the platform cache directory
+  --claude-root <PATH>         Override Claude Code projects dir [default: ~/.claude/projects]
+  --codex-root <PATH>          Override Codex sessions dir [default: ~/.codex/sessions]
+  --claude-desktop-root <PATH> Override Claude Desktop local-agent-mode dir
+  --gemini-root <PATH>         Override Gemini CLI tmp dir [default: ~/.gemini/tmp]
+  --hermes-root <PATH>         Override Hermes Agent state dir [default: ~/.hermes]
+  --opencode-root <PATH>       Override OpenCode share dir [default: ~/.local/share/opencode]
+  -h, --help                   Print help
+  -V, --version                Print version
 ```
+
+Use the `--*-root` flags when your sessions live under a custom dotfiles path or behind a symlink the default detection misses.
 
 ### Keybindings
 
-#### Navigation (Normal mode)
+All bindings can be customised in **Settings → Keybindings** (changes save to disk on the spot).
+
+#### Global / Normal mode
 
 | Key | Action |
 | --- | --- |
@@ -124,9 +138,18 @@ Options:
 | `Shift+Tab` / `←` | Previous tab |
 | `j` / `↓` | Move selection down |
 | `k` / `↑` | Move selection up |
-| `Enter` | Dashboard: jump to session for selected process · Sessions: open viewer · Settings: toggle |
+| `Enter` | Dashboard: jump to selected session/project · Sessions: open viewer · Settings: toggle |
 | `f` | Force rescan sessions |
+| `?` | Toggle keyboard-shortcut overlay |
+| `*` | Star the project on GitHub (uses `gh` if available) |
 | `q` / `Ctrl+C` | Quit |
+
+#### Dashboard tab
+
+| Key | Action |
+| --- | --- |
+| `Tab` (inside Dashboard) | Cycle focus between Live Processes ↔ Top Projects |
+| `Enter` | Process panel: jump to that session · Project panel: filter Sessions by `cwd:<path>` |
 
 #### Sessions tab
 
@@ -136,21 +159,26 @@ Options:
 | `a` | Toggle `status:active` filter |
 | `s` | Cycle sort order (updated ↓ → tokens ↓ → size ↓ → msgs ↓ → status ↓) |
 | `c` | Clear filter |
+| `b` | Toggle bookmark — starred sessions float to the top under the default sort |
 | `r` | Restore selected session in a new terminal |
 | `d` / `Delete` | Delete selected session (with confirmation) |
+| `Enter` | Open conversation viewer |
 
 #### Conversation viewer
 
 | Key | Action |
 | --- | --- |
-| `Esc` / `q` | Back to Sessions |
-| `j` / `↓` | Scroll down one line |
-| `k` / `↑` | Scroll up one line |
+| `Esc` | Back to Sessions |
+| `j` / `↓` · `k` / `↑` | Scroll one line down / up |
 | `Ctrl+D` / `Ctrl+U` | Half-page scroll |
 | `PgDn` / `PgUp` | Full-page scroll |
 | `g` / `G` | Jump to top / bottom |
-| `e` | Expand all collapsed sections (thinking, tool_use, tool_result, attachment) |
-| `c` | Collapse all sections |
+| `e` / `c` | Expand / collapse all sections (thinking, tool_use, tool_result, attachment) |
+| `/` | Start search; type to live-filter, `Enter` commits |
+| `n` / `N` | Jump to next / previous match |
+| `Esc` (with active search) | Clear search instead of leaving the viewer |
+| `E` | Export the rendered conversation to `~/Downloads/agent-monitor/<agent>-<short_id>.md` |
+| `y` | Copy the rendered Markdown to the system clipboard |
 | `r` | Restore this session in a new terminal |
 | `d` / `Delete` | Delete this session (with confirmation) |
 
@@ -170,12 +198,25 @@ crates/agentmonitor/src/
     conversation.rs    shared conversation event model
     types.rs           SessionMeta, TokenStats, MessagePreview
   collector/       background data sources
-    fs_watch.rs    notify-backed file watcher + 10s reconcile fallback
-    proc_sampler.rs ps-style process sampling
-    token_refresh.rs full-parse token computation + (path, mtime) cache
-  tui/             ratatui renderers (dashboard / sessions / process / viewer)
+    fs_watch.rs        notify-backed file watcher + 10s reconcile fallback
+    proc_sampler.rs    ps-style process sampling
+    token_refresh.rs   full-parse token computation + (path, mtime) cache
+    token_trend.rs     rolling-window sample buffer for the dashboard rate
+    responsible.rs     resolves agent processes to launcher app & responsible PID
+    diagnostics.rs     counters surfaced on the Settings tab
+  tui/             ratatui renderers
+    dashboard.rs   overview, top projects, 24h activity, agent breakdown, cost & rate
+    sessions.rs    list + filter + detail pane + recent-message preview
+    viewer.rs      full-screen transcript with search, export & copy
+    settings.rs    settings panel + keybinding editor + diagnostics
+    help.rs        keyboard-shortcut overlay
+    render.rs      top-level frame layout + toast banner
   app.rs           AppState (RwLock-guarded), App, SessionSort
   event.rs         event loop + key dispatch + Notify plumbing
+  export.rs        conversation → Markdown renderer + atomic write + clipboard
+  pricing.rs       per-model USD pricing for the dashboard cost aggregate
+  settings.rs      persisted settings (theme, language, terminal, keybindings, …)
+  i18n.rs          en / zh-CN translations
   main.rs          entry point
 npm/               npm publishing pipeline with platform-specific packages
 ```
